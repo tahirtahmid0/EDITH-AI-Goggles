@@ -165,7 +165,7 @@ class VisualTracker:
                         "last_event_center": center,
                     }
                     self.record(
-                        "object_appeared",
+                        "track_started" if identity["identity_match"] == "reconnected" else "object_appeared",
                         track_id,
                         class_name=class_name,
                         confidence=observation["confidence"],
