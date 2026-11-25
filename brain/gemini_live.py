@@ -219,16 +219,23 @@ class GeminiLiveAssistant:
         camera_ready: threading.Event,
     ) -> None:
         sent = 0
+        loop = asyncio.get_running_loop()
+        next_send = loop.time()
         while not self._stop.is_set():
             try:
                 frame = await asyncio.to_thread(frames.get, True, 2.0)
             except queue.Empty:
                 continue
 
+            delay = next_send - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+
             await session.send_realtime_input(
                 video=types.Blob(data=frame, mime_type="image/jpeg")
             )
             sent += 1
+            next_send = loop.time() + FRAME_INTERVAL_SECONDS
             if sent <= 3 or sent % 30 == 0:
                 print(f"[EDITH GEMINI] Camera frames sent: {sent}")
             if sent >= 3 and not camera_ready.is_set():
