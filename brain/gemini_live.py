@@ -319,20 +319,20 @@ class GeminiLiveAssistant:
         )
         reader.start()
 
-        self._client = genai.Client(
-            api_key=self.api_key,
-            http_options=types.HttpOptions(api_version="v1beta"),
-        )
-        config = types.LiveConnectConfig(
-            response_modalities=[types.Modality.AUDIO],
-            output_audio_transcription=types.AudioTranscriptionConfig(),
-            system_instruction=types.Content(
-                parts=[types.Part(text=SYSTEM_INSTRUCTION)]
-            ),
-        )
-
-        print(f"[EDITH GEMINI] Connecting to {self.model}...")
         try:
+            self._client = genai.Client(
+                api_key=self.api_key,
+                http_options=types.HttpOptions(api_version="v1beta"),
+            )
+            config = types.LiveConnectConfig(
+                response_modalities=[types.Modality.AUDIO],
+                output_audio_transcription=types.AudioTranscriptionConfig(),
+                system_instruction=types.Content(
+                    parts=[types.Part(text=SYSTEM_INSTRUCTION)]
+                ),
+            )
+
+            print(f"[EDITH GEMINI] Connecting to {self.model}...")
             async with self._client.aio.live.connect(
                 model=self.model,
                 config=config,
