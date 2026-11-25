@@ -1,4 +1,4 @@
-"""EDITH local visual tracking engine.
+""""EDITH local visual tracking engine.
 
 Runs YOLO11 + ByteTrack against the ESP32-CAM MJPEG stream.
 Writes event records to a JSONL file and does not touch the existing SQLite memory.
@@ -10,6 +10,7 @@ import json
 import os
 import signal
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
@@ -54,6 +55,9 @@ class VisualTracker:
         self.model = model
         self.events_path = events_path
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
+        # Identity IDs reset on each run, so every event also carries a
+        # unique session ID to prevent identities from colliding in history.
+        self.session_id = uuid.uuid4().hex
         self.active: dict[int, dict[str, Any]] = {}
         self.identity_manager = IdentityManager()
         self.timings: list[dict[str, float]] = []
@@ -61,6 +65,7 @@ class VisualTracker:
     def record(self, event_type: str, track_id: int, **details: Any) -> None:
         event = {
             "timestamp": utc_now(),
+            "session_id": self.session_id,
             "event": event_type,
             "track_id": track_id,
             **details,
@@ -262,6 +267,7 @@ def run() -> None:
 
     model = YOLO(str(MODEL_PATH))
     tracker = VisualTracker(model)
+    print(f"Tracking session ID: {tracker.session_id}")
     frame_count = 0
     processed_count = 0
     next_process = 0.0
