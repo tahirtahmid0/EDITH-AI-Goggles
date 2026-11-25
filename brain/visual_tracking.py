@@ -126,12 +126,25 @@ class VisualTracker:
                 observations.append(observation)
 
                 if identity["identity_match"] == "reconnected":
+                    previous_track_id = identity.get("previous_track_id")
+                    if previous_track_id is not None and previous_track_id != track_id:
+                        # The old ByteTrack ID has been replaced by this new
+                        # track for the same visual identity. Avoid a later,
+                        # misleading disappearance event for the stale track.
+                        self.active.pop(previous_track_id, None)
+                        self.record(
+                            "track_id_replaced",
+                            previous_track_id,
+                            class_name=class_name,
+                            visual_identity_id=identity["visual_identity_id"],
+                            replacement_track_id=track_id,
+                        )
                     self.record(
                         "identity_reassociated",
                         track_id,
                         class_name=class_name,
                         visual_identity_id=identity["visual_identity_id"],
-                        previous_track_id=identity.get("previous_track_id"),
+                        previous_track_id=previous_track_id,
                         match_score=identity["identity_score"],
                     )
                 elif identity["identity_match"] == "uncertain_new":
