@@ -246,6 +246,11 @@ class GeminiLiveAssistant:
 
     async def _send_questions(self, session) -> None:
         while not self._stop.is_set():
+            # Do not associate a late response with a newer request if the
+            # caller timed out while Gemini was still generating its answer.
+            while self._active_request is not None and not self._stop.is_set():
+                await asyncio.sleep(0.05)
+
             try:
                 request = await asyncio.to_thread(
                     self._requests.get, True, 0.5
@@ -266,6 +271,9 @@ class GeminiLiveAssistant:
                             mime_type="audio/pcm;rate=16000",
                         )
                     )
+                    # This is a complete recorded utterance, not an open-ended
+                    # microphone stream. Explicitly close its audio input turn.
+                    await session.send_realtime_input(audio_stream_end=True)
                 else:
                     await session.send_realtime_input(text=request["question"])
             except Exception as exc:
