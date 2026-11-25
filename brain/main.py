@@ -1,4 +1,5 @@
 
+import os
 import traceback
 
 from silero_vad import load_silero_vad
@@ -30,6 +31,21 @@ def main():
         memory.initialise_database()
 
         print("[EDITH] Memory system ready!")
+
+        # ==================================
+        # MAC-ONLY DESKTOP DEVELOPMENT MODE
+        # ==================================
+
+        desktop_mode = os.getenv(
+            "EDITH_DESKTOP_MODE", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
+
+        if desktop_mode:
+            os.environ.setdefault("EDITH_TTS_OUTPUT", "local")
+            print("\n[EDITH] Starting Mac-only text command mode.")
+            print("[EDITH] No microphone, ESP32-CAM or speaker is required.")
+            audio.run_text_mode()
+            return
 
         # ==================================
         # INITIALISE SPEECH DETECTION
