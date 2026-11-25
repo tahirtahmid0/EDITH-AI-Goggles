@@ -19,7 +19,13 @@ import torch
 from PIL import Image
 from ultralytics import YOLO
 
-from brain.gemini_live import get_camera_stream_url, iter_mjpeg_frames
+# Support both launch styles:
+#   python -m brain.visual_tracking
+#   python brain/visual_tracking.py (including IDE Run configurations)
+if __package__:
+    from .gemini_live import get_camera_stream_url, iter_mjpeg_frames
+else:
+    from gemini_live import get_camera_stream_url, iter_mjpeg_frames
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
