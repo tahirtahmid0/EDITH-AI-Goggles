@@ -268,12 +268,68 @@ def speak(text):
 
 
 
-def respond(text):
-    """
-    Save EDITH's actual response to conversational memory,
-    then speak it aloud.
-    """
+def play_gemini_audio(audio_data):
+    """Play Gemini's native 24 kHz PCM response locally or through the ESP32."""
+    if not audio_data:
+        return False
 
+    output_mode = os.getenv("EDITH_TTS_OUTPUT", "esp32").strip().lower()
+    if output_mode in ("console", "silent", "none", "off"):
+        return False
+
+    speaking.set()
+    try:
+        TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="edith_gemini_audio_", dir=TEMP_DIR) as folder:
+            wav_path = Path(folder) / "gemini_response.wav"
+            with wave.open(str(wav_path), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(24000)
+                wav.writeframes(audio_data)
+
+            if output_mode == "local":
+                subprocess.run(
+                    ["/usr/bin/afplay", str(wav_path)],
+                    check=True,
+                    timeout=90,
+                )
+                return True
+
+            conversion = subprocess.run(
+                [
+                    FFMPEG_PATH, "-v", "error", "-i", str(wav_path),
+                    "-f", "s16le", "-acodec", "pcm_s16le",
+                    "-ac", "1", "-ar", str(TTS_SAMPLE_RATE), "pipe:1",
+                ],
+                capture_output=True,
+                check=True,
+                timeout=45,
+            )
+            pcm_audio = conversion.stdout
+            pcm_audio = pcm_audio[:len(pcm_audio) - (len(pcm_audio) % 2)]
+            if not pcm_audio:
+                raise RuntimeError("Gemini audio conversion produced no PCM data.")
+
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as speaker_socket:
+                for offset in range(0, len(pcm_audio), TTS_PACKET_BYTES):
+                    packet = pcm_audio[offset:offset + TTS_PACKET_BYTES]
+                    if packet:
+                        speaker_socket.sendto(packet, (TTS_ESP32_IP, TTS_ESP32_PORT))
+                        time.sleep(
+                            len(packet) / (TTS_SAMPLE_RATE * TTS_CHANNELS * TTS_SAMPLE_WIDTH)
+                        )
+        return True
+    except Exception as error:
+        print("[EDITH GEMINI AUDIO] Playback failed:", error)
+        traceback.print_exc()
+        return False
+    finally:
+        speaking.clear()
+
+
+def respond(text, audio_data=None):
+    """Save EDITH's response and play Gemini's native voice when available."""
     if not text:
         return
 
@@ -283,11 +339,11 @@ def respond(text):
             content=text,
             visual_memory_id=getattr(vision, "CURRENT_MEMORY_ID", None)
         )
-
     except Exception as error:
         print("[EDITH MEMORY] Could not save assistant response:", error)
 
-    speak(text)
+    if not audio_data or not play_gemini_audio(audio_data):
+        speak(text)
 
 
 # ==========================================
@@ -425,6 +481,80 @@ atexit.register(close_moondream_session)
 
 
 # ==========================================
+# GEMINI LIVE ASSISTANT INTEGRATION
+# ==========================================
+
+_GEMINI_ASSISTANT = None
+_GEMINI_START_ATTEMPTED = False
+
+
+def start_gemini_live():
+    """Start one persistent Gemini Live session when credentials are configured."""
+    global _GEMINI_ASSISTANT, _GEMINI_START_ATTEMPTED
+
+    if _GEMINI_START_ATTEMPTED:
+        return _GEMINI_ASSISTANT is not None
+
+    _GEMINI_START_ATTEMPTED = True
+    enabled = os.getenv("EDITH_GEMINI_LIVE_ENABLED", "true").strip().lower()
+    if enabled not in ("1", "true", "yes", "on"):
+        print("[EDITH GEMINI] Disabled by EDITH_GEMINI_LIVE_ENABLED.")
+        return False
+
+    if not os.getenv("GEMINI_API_KEY", "").strip():
+        print("[EDITH GEMINI] GEMINI_API_KEY not configured; local AI remains available.")
+        return False
+
+    try:
+        try:
+            from brain.gemini_live import GeminiLiveAssistant
+        except ImportError:
+            from gemini_live import GeminiLiveAssistant
+
+        assistant = GeminiLiveAssistant()
+        assistant.start()
+        _GEMINI_ASSISTANT = assistant
+        print("[EDITH GEMINI] Gemini Live is now EDITH's primary conversational brain.")
+        return True
+    except Exception as error:
+        print("[EDITH GEMINI] Could not start Live mode; using local systems:", error)
+        traceback.print_exc()
+        _GEMINI_ASSISTANT = None
+        return False
+
+
+def close_gemini_live():
+    global _GEMINI_ASSISTANT
+    assistant = _GEMINI_ASSISTANT
+    _GEMINI_ASSISTANT = None
+    if assistant is not None:
+        assistant.close()
+
+
+def answer_with_gemini(command):
+    """Send a natural-language request to the persistent Gemini Live session."""
+    if _GEMINI_ASSISTANT is None:
+        return False
+
+    try:
+        print("[EDITH GEMINI] Sending request with the live camera context...")
+        result = _GEMINI_ASSISTANT.ask(command)
+        if not result or not result.get("text"):
+            print("[EDITH GEMINI] No transcript returned; falling back to local AI.")
+            return False
+
+        answer = result["text"].strip()
+        print("[EDITH / GEMINI] " + answer)
+        respond(answer, audio_data=result.get("audio"))
+        return True
+    except Exception as error:
+        print("[EDITH GEMINI] Request failed; falling back to local AI:", error)
+        traceback.print_exc()
+        return False
+
+
+
+# ==========================================
 # VISUAL QUESTION ROUTING
 # ==========================================
 
@@ -493,9 +623,13 @@ def build_visual_question_prompt(command):
 
 
 def answer_live_visual_question(command):
-    """Capture the configured image source and answer with Moondream."""
+    """Prefer Gemini's live camera context; retain Moondream as local fallback."""
+    if _GEMINI_ASSISTANT is not None:
+        if answer_with_gemini(command):
+            return
+
     speak("Give me a moment. I'm checking the image.")
-    print("[EDITH] Answering a live visual question:", command)
+    print("[EDITH] Answering a live visual question with Moondream:", command)
 
     try:
         image = capture_image()
@@ -1330,14 +1464,16 @@ def process_command(text):
         answer_live_visual_question(command)
 
     else:
-        print("[EDITH] I don't recognise that command yet.")
-        speak("I don't recognise that command yet.")
+        if not answer_with_gemini(text):
+            print("[EDITH] Gemini is unavailable and no local command matched.")
+            speak("I couldn't process that request right now.")
 
 
 
 def run_text_mode():
     """Run EDITH from the Mac terminal without microphone or ESP32 hardware."""
     os.environ.setdefault("EDITH_TTS_OUTPUT", "local")
+    start_gemini_live()
 
     print("\n========================================")
     print("       EDITH MAC DESKTOP MODE")
@@ -1369,6 +1505,7 @@ def run_text_mode():
         print("\n[EDITH] Desktop session interrupted.")
 
     finally:
+        close_gemini_live()
         close_moondream_session()
         print("[EDITH] Desktop session ended.")
 
@@ -1547,6 +1684,8 @@ def main(vad_model):
     print("========================================")
     print("       EDITH AUTOMATIC LISTENING")
     print("========================================")
+
+    start_gemini_live()
 
     receiver = socket.socket(
         socket.AF_INET,
@@ -1757,6 +1896,8 @@ def main(vad_model):
         audio_queue.put(None)
 
         worker.join()
+        close_gemini_live()
+        close_moondream_session()
 
         print("[EDITH] Audio system stopped.")
 
