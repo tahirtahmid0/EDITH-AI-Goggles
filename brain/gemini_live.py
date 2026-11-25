@@ -207,25 +207,33 @@ async def send_user_text(
 
 
 async def receive_gemini_responses(session, stop_event: threading.Event):
-    """Print text parts returned by Gemini Live."""
-    async for response in session.receive():
-        content = response.server_content
-        if not content:
-            continue
+    """Keep receiving Live API events across multiple completed response turns."""
+    while not stop_event.is_set():
+        # The SDK receive iterator can finish at the end of a response turn.
+        # Re-enter it so the same Live session remains available for the next
+        # question instead of treating one answer as session completion.
+        async for response in session.receive():
+            content = response.server_content
+            if not content:
+                continue
 
-        # Live models return audio; request and display its text transcription.
-        if content.output_transcription and content.output_transcription.text:
-            print(
-                f"\n[EDITH / GEMINI] {content.output_transcription.text}",
-                end="",
-                flush=True,
-            )
+            # Live models return audio; request and display its text transcription.
+            if content.output_transcription and content.output_transcription.text:
+                print(
+                    f"\n[EDITH / GEMINI] {content.output_transcription.text}",
+                    end="",
+                    flush=True,
+                )
 
-        if content.turn_complete:
-            print("\n[EDITH GEMINI] Response complete.\n", flush=True)
+            if content.turn_complete:
+                print("\n[EDITH GEMINI] Response complete.\n", flush=True)
 
-        if stop_event.is_set():
-            return
+            if stop_event.is_set():
+                return
+
+        if not stop_event.is_set():
+            # Avoid a tight loop if the receive iterator ends between turns.
+            await asyncio.sleep(0.05)
 
 
 async def run_live_vision():
