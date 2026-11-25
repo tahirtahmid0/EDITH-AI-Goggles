@@ -51,12 +51,13 @@ diagram.`</em>`{=html}
 
 ## What EDITH is designed to do
 
--   **Visual understanding:** capture an image from the ESP32-CAM and
-    analyse the scene.
--   **Object detection:** use YOLO11 to identify objects in a camera
-    image.
--   **Visual question answering:** use Moondream 2 to help interpret a
-    scene and answer questions about it.
+-   **Live conversational intelligence:** use Gemini Live for
+    camera-grounded, natural-language conversations and native spoken
+    responses.
+-   **Object detection:** use YOLO11 to identify and locate objects in a
+    camera image.
+-   **Local visual question answering:** use Moondream 2 as a local
+    fallback for detailed image analysis when Gemini Live is unavailable.
 -   **Voice input:** receive microphone audio from an INMP441 microphone
     connected to an ESP32 DevKit.
 -   **Speech recognition:** use Whisper to transcribe spoken input.
@@ -204,7 +205,8 @@ unchanged unless the Python client is updated at the same time.
   Python 3.12                Main application runtime
   PyTorch                    Machine-learning runtime
   YOLO11s                    Object detection
-  Moondream 2                Image understanding and visual question answering
+  Gemini Live                Live camera-grounded conversation and native audio
+  Moondream 2                Local visual question-answering fallback
   Whisper                    Speech-to-text
   Silero VAD                 Voice activity detection
   macOS text-to-speech       Spoken assistant responses
@@ -264,6 +266,38 @@ committed; remove it from the Git index and rotate any exposed
 credentials.
 
 ------------------------------------------------------------------------
+
+## Gemini Live integration
+
+Gemini Live is the primary conversational model when a Gemini API key is
+configured. EDITH keeps its local command handlers: YOLO handles explicit
+object-detection requests, SQLite handles stored memories, and Moondream
+remains available as a local visual fallback. The camera feed is sent to
+Gemini at approximately one frame per second, matching the Live API limit.
+The existing Whisper microphone pipeline supplies recognised speech as
+text, while Gemini's native audio response is played locally or streamed
+to the ESP32 speaker.
+
+Install the optional Gemini dependency in the existing virtual environment:
+
+```bash
+python -m pip install -r requirements-gemini.txt
+```
+
+Add these settings to the local, untracked `.env` file. Keep the API key
+private and never commit it:
+
+```env
+GEMINI_API_KEY=your_gemini_api_key
+GEMINI_LIVE_MODEL=gemini-3.8-live
+EDITH_GEMINI_LIVE_ENABLED=true
+```
+
+For Mac-only testing, set `EDITH_DESKTOP_MODE=true` and
+`EDITH_IMAGE_PATH=/absolute/path/to/test.jpg`. EDITH will repeatedly send
+that local image as its camera source. For the wearable, leave
+`EDITH_IMAGE_PATH` unset and configure `CAMERA_URL` or
+`CAMERA_STREAM_URL` for the ESP32-CAM.
 
 ## Setup overview
 
