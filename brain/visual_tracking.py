@@ -52,7 +52,7 @@ class VisualTracker:
         self.events_path = events_path
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
         self.active: dict[int, dict[str, Any]] = {}
-        self.session_started = time.monotonic()
+        self.timings: list[dict[str, float]] = []
 
     def record(self, event_type: str, track_id: int, **details: Any) -> None:
         event = {
@@ -70,9 +70,13 @@ class VisualTracker:
         )
 
     def process_jpeg(self, jpeg: bytes) -> list[dict[str, Any]]:
+        frame_started = time.perf_counter()
+        decode_started = time.perf_counter()
         with Image.open(__import__("io").BytesIO(jpeg)) as source:
             image = source.convert("RGB")
+        decode_ms = (time.perf_counter() - decode_started) * 1000
 
+        model_started = time.perf_counter()
         results = self.model.track(
             source=image,
             persist=True,
@@ -82,8 +86,10 @@ class VisualTracker:
             conf=CONFIDENCE,
             verbose=False,
         )
+        model_ms = (time.perf_counter() - model_started) * 1000
         result = results[0]
         boxes = result.boxes
+        bookkeeping_started = time.perf_counter()
         now = time.monotonic()
         seen_ids: set[int] = set()
         observations: list[dict[str, Any]] = []
@@ -164,6 +170,14 @@ class VisualTracker:
                 last_seen_seconds_ago=round(now - state["last_seen"], 1),
             )
 
+        bookkeeping_ms = (time.perf_counter() - bookkeeping_started) * 1000
+        total_ms = (time.perf_counter() - frame_started) * 1000
+        self.timings.append({
+            "decode_ms": decode_ms,
+            "model_ms": model_ms,
+            "bookkeeping_ms": bookkeeping_ms,
+            "total_ms": total_ms,
+        })
         return observations
 
 
@@ -228,6 +242,16 @@ def run() -> None:
         print("\n[EDITH TRACKING] Stopped.")
         print(f"Processed frames: {processed_count}")
         print(f"Average processing rate: {processed_count / elapsed:.2f} FPS")
+        if tracker.timings:
+            count = len(tracker.timings)
+            for key, label in (
+                ("decode_ms", "JPEG decode"),
+                ("model_ms", "YOLO + ByteTrack"),
+                ("bookkeeping_ms", "Event processing + logging"),
+                ("total_ms", "Total frame processing"),
+            ):
+                average = sum(sample[key] for sample in tracker.timings) / count
+                print(f"Average {label} time: {average:.1f} ms")
         print(f"Event log: {EVENTS_PATH}")
         del model
 
