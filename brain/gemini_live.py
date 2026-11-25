@@ -258,7 +258,16 @@ class GeminiLiveAssistant:
 
             self._active_request = request
             try:
-                await session.send_realtime_input(text=request["question"])
+                audio_data = request.get("audio_data")
+                if audio_data:
+                    await session.send_realtime_input(
+                        audio=types.Blob(
+                            data=audio_data,
+                            mime_type="audio/pcm;rate=16000",
+                        )
+                    )
+                else:
+                    await session.send_realtime_input(text=request["question"])
             except Exception as exc:
                 request["error"] = exc
                 request["done"].set()
@@ -364,10 +373,17 @@ class GeminiLiveAssistant:
                 await self._client.aio.aclose()
                 self._client = None
 
-    def ask(self, question: str, timeout: float = 90.0) -> dict | None:
-        """Send a question and return its transcript and native audio bytes."""
+    def ask(
+        self,
+        question: str,
+        audio_data: bytes | None = None,
+        timeout: float = 90.0,
+    ) -> dict | None:
+        """Send typed text or a 16 kHz PCM utterance; return transcript and audio."""
         question = str(question).strip()
-        if not question or self._stop.is_set() or not self._ready.is_set():
+        if not question and not audio_data:
+            return None
+        if self._stop.is_set() or not self._ready.is_set():
             return None
         if self._startup_error:
             raise RuntimeError(str(self._startup_error))
@@ -375,6 +391,7 @@ class GeminiLiveAssistant:
         with self._ask_lock:
             request = {
                 "question": question,
+                "audio_data": audio_data,
                 "done": threading.Event(),
                 "text_parts": [],
                 "audio_parts": [],
