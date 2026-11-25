@@ -274,9 +274,10 @@ configured. EDITH keeps its local command handlers: YOLO handles explicit
 object-detection requests, SQLite handles stored memories, and Moondream
 remains available as a local visual fallback. The camera feed is sent to
 Gemini at approximately one frame per second, matching the Live API limit.
-The existing Whisper microphone pipeline supplies recognised speech as
-text, while Gemini's native audio response is played locally or streamed
-to the ESP32 speaker.
+Whisper recognises speech for EDITH's local command routing. When a
+request is sent to Gemini, EDITH also forwards the original 16 kHz
+microphone PCM utterance alongside the live camera frames. Gemini's native
+audio response is played locally or streamed to the ESP32 speaker.
 
 Install the optional Gemini dependency in the existing virtual environment:
 
