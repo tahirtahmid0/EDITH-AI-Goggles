@@ -40,7 +40,7 @@ IMAGE_SIZE = 640
 CONFIDENCE = 0.15
 MOVEMENT_THRESHOLD_PX = 45.0
 DISAPPEAR_AFTER_SECONDS = 4.0
-TRACKER_CONFIG = BASE_DIR / "brain" / "bytetrack_short_buffer.yaml"
+TRACKER_CONFIG = BASE_DIR / "configs" / "trackers" / "bytetrack_short_buffer.yaml"
 
 
 def utc_now() -> str:
