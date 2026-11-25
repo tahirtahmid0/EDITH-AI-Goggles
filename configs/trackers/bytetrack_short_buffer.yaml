@@ -1,0 +1,9 @@
+# EDITH experimental ByteTrack configuration with a short lost-track buffer.
+# track_buffer is measured in tracker frames, not seconds.
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.10
+new_track_thresh: 0.25
+track_buffer: 2
+match_thresh: 0.80
+fuse_score: True
