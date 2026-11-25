@@ -221,7 +221,12 @@ async def run_live_vision():
     )
     reader.start()
 
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=api_key,
+        # Gemini Live API is currently available on v1beta, while google-genai 3.x
+        # defaults the Gemini Developer API to v1.
+        http_options=types.HttpOptions(api_version="v1beta"),
+    )
     config = types.LiveConnectConfig(
         response_modalities=[types.Modality.AUDIO],
         output_audio_transcription=types.AudioTranscriptionConfig(),
