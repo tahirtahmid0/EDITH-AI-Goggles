@@ -40,6 +40,7 @@ IMAGE_SIZE = 640
 CONFIDENCE = 0.15
 MOVEMENT_THRESHOLD_PX = 45.0
 DISAPPEAR_AFTER_SECONDS = 4.0
+TRACKER_CONFIG = BASE_DIR / "brain" / "bytetrack_short_buffer.yaml"
 
 
 def utc_now() -> str:
@@ -83,7 +84,7 @@ class VisualTracker:
         results = self.model.track(
             source=image,
             persist=True,
-            tracker="bytetrack.yaml",
+            tracker=str(TRACKER_CONFIG),
             device="mps" if torch.backends.mps.is_available() else "cpu",
             imgsz=IMAGE_SIZE,
             conf=CONFIDENCE,
@@ -139,14 +140,23 @@ class VisualTracker:
                             visual_identity_id=identity["visual_identity_id"],
                             replacement_track_id=track_id,
                         )
-                    self.record(
-                        "identity_reassociated",
-                        track_id,
-                        class_name=class_name,
-                        visual_identity_id=identity["visual_identity_id"],
-                        previous_track_id=previous_track_id,
-                        match_score=identity["identity_score"],
-                    )
+                    if previous_track_id != track_id:
+                        self.record(
+                            "identity_reassociated",
+                            track_id,
+                            class_name=class_name,
+                            visual_identity_id=identity["visual_identity_id"],
+                            previous_track_id=previous_track_id,
+                            match_score=identity["identity_score"],
+                        )
+                    else:
+                        self.record(
+                            "identity_recovered_same_track",
+                            track_id,
+                            class_name=class_name,
+                            visual_identity_id=identity["visual_identity_id"],
+                            match_score=identity["identity_score"],
+                        )
                 elif identity["identity_match"] == "uncertain_new":
                     self.record(
                         "identity_possible_match",
@@ -246,6 +256,7 @@ def run() -> None:
     print(f"Model: {MODEL_PATH}")
     print(f"Camera: {stream_url}")
     print(f"Target tracking rate: {TRACKING_FPS:.1f} FPS")
+    print(f"Tracker config: {TRACKER_CONFIG}")
     print(f"Event log: {EVENTS_PATH}")
     print("Press Ctrl+C to stop.\n")
 
@@ -271,7 +282,8 @@ def run() -> None:
             processed_count += 1
 
             summary = ", ".join(
-                f"ID {item['track_id']} {item['class_name']}"
+                f"Track {item['track_id']} {item['class_name']} "
+                f"[{item['visual_identity_id']}]"
                 for item in observations
             )
             print(
