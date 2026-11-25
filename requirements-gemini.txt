@@ -1,0 +1,3 @@
+# Optional dependencies for EDITH's separate Gemini Live vision backend.
+# Install into the existing .venv312 environment.
+google-genai>=2.3.0
