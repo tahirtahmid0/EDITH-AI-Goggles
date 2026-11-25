@@ -231,8 +231,22 @@ class GeminiLiveAssistant:
             if delay > 0:
                 await asyncio.sleep(delay)
 
-            await session.send_realtime_input(
-                video=types.Blob(data=frame, mime_type="image/jpeg")
+            # Use ordered client content for every visual frame. Gemini's
+            # realtime_input path does not guarantee ordering relative to text,
+            # which can let a question overtake the image during preprocessing.
+            await session.send_client_content(
+                turns=types.Content(
+                    role="user",
+                    parts=[
+                        types.Part(
+                            inline_data=types.Blob(
+                                data=frame,
+                                mime_type="image/jpeg",
+                            )
+                        )
+                    ],
+                ),
+                turn_complete=False,
             )
             sent += 1
             next_send = loop.time() + FRAME_INTERVAL_SECONDS
@@ -265,17 +279,30 @@ class GeminiLiveAssistant:
             try:
                 audio_data = request.get("audio_data")
                 if audio_data:
-                    await session.send_realtime_input(
-                        audio=types.Blob(
-                            data=audio_data,
-                            mime_type="audio/pcm;rate=16000",
-                        )
+                    # Keep all session inputs on the ordered client_content
+                    # path; do not mix it with realtime_input in one session.
+                    await session.send_client_content(
+                        turns=types.Content(
+                            role="user",
+                            parts=[
+                                types.Part(
+                                    inline_data=types.Blob(
+                                        data=audio_data,
+                                        mime_type="audio/pcm;rate=16000",
+                                    )
+                                )
+                            ],
+                        ),
+                        turn_complete=True,
                     )
-                    # This is a complete recorded utterance, not an open-ended
-                    # microphone stream. Explicitly close its audio input turn.
-                    await session.send_realtime_input(audio_stream_end=True)
                 else:
-                    await session.send_realtime_input(text=request["question"])
+                    await session.send_client_content(
+                        turns=types.Content(
+                            role="user",
+                            parts=[types.Part(text=request["question"])],
+                        ),
+                        turn_complete=True,
+                    )
             except Exception as exc:
                 request["error"] = exc
                 request["done"].set()
