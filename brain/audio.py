@@ -1070,6 +1070,10 @@ def process_command(text):
 
             else:
 
+                if is_visual_question(command):
+                    answer_live_visual_question(command)
+                    return
+
                 response = "I couldn't find that in my memories."
 
         print("[EDITH MEMORY] Response:", response)
