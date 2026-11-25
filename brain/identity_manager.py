@@ -143,7 +143,11 @@ class IdentityManager:
         identity_id = self.track_to_identity.get(track_id)
         state = self.identities.get(identity_id) if identity_id else None
 
-        if state is not None and state.class_name == class_name:
+        if (
+            state is not None
+            and state.class_name == class_name
+            and state.identity_id not in self.seen_this_frame
+        ):
             dt = max(0.001, now - state.last_seen)
             measured_velocity = (
                 (center[0] - state.center[0]) / dt,
