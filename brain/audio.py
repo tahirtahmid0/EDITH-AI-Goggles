@@ -532,21 +532,35 @@ def close_gemini_live():
 
 
 def answer_with_gemini(command, audio_data=None):
-    """Send a natural-language request and, when available, its original microphone audio."""
+    """Send a request to Gemini and preserve native audio even without a transcript."""
     if _GEMINI_ASSISTANT is None:
         return False
 
     try:
         print("[EDITH GEMINI] Sending request with the live camera context...")
         result = _GEMINI_ASSISTANT.ask(command, audio_data=audio_data)
-        if not result or not result.get("text"):
-            print("[EDITH GEMINI] No transcript returned; falling back to local AI.")
+
+        if not result:
+            print("[EDITH GEMINI] No response returned; falling back to local AI.")
             return False
 
-        answer = result["text"].strip()
-        print("[EDITH / GEMINI] " + answer)
-        respond(answer, audio_data=result.get("audio"))
-        return True
+        answer = str(result.get("text") or "").strip()
+        response_audio = result.get("audio")
+
+        if answer:
+            print("[EDITH / GEMINI] " + answer)
+            respond(answer, audio_data=response_audio)
+            return True
+
+        # Audio can be valid even if output transcription is absent.
+        if response_audio:
+            print("[EDITH GEMINI] Audio returned without a transcript; playing native response.")
+            if play_gemini_audio(response_audio):
+                return True
+
+        print("[EDITH GEMINI] No usable text or audio returned; falling back to local AI.")
+        return False
+
     except Exception as error:
         print("[EDITH GEMINI] Request failed; falling back to local AI:", error)
         traceback.print_exc()
