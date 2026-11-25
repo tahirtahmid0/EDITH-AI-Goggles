@@ -257,7 +257,6 @@ async def run_live_vision():
         stop_event.set()
         reader.join(timeout=3.0)
         await client.aio.aclose()
-        client.close()
         print("[EDITH GEMINI] Session closed.")
 
 
