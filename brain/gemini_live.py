@@ -132,7 +132,12 @@ def camera_reader(url: str, frames: queue.Queue, stop_event: threading.Event):
     print("[EDITH GEMINI] Camera reader stopped.")
 
 
-async def send_camera_frames(session, frames: queue.Queue, stop_event: threading.Event):
+async def send_camera_frames(
+    session,
+    frames: queue.Queue,
+    stop_event: threading.Event,
+    camera_ready: asyncio.Event,
+):
     """Send the latest camera JPEG at a safe, approximately 1 FPS cadence."""
     loop = asyncio.get_running_loop()
     sent = 0
@@ -152,14 +157,35 @@ async def send_camera_frames(session, frames: queue.Queue, stop_event: threading
             video=types.Blob(data=frame, mime_type="image/jpeg")
         )
         sent += 1
-        if sent == 1 or sent % 30 == 0:
+        if sent <= 3 or sent % 30 == 0:
             print(f"[EDITH GEMINI] Sent {sent} camera frames.")
+
+        # Do not let the user ask visual questions until several real frames
+        # have successfully been sent to Gemini.
+        if sent >= 3 and not camera_ready.is_set():
+            camera_ready.set()
+            print("[EDITH GEMINI] Camera feed confirmed; visual questions enabled.")
 
         next_send = loop.time() + FRAME_INTERVAL_SECONDS
 
 
-async def send_user_text(session, stop_event: threading.Event):
-    """Read typed questions without blocking the Live API receive loop."""
+async def send_user_text(
+    session,
+    stop_event: threading.Event,
+    camera_ready: asyncio.Event,
+):
+    """Read typed questions only after camera frames reach the Live session."""
+    print("\n[EDITH GEMINI] Waiting for the camera feed to initialise...")
+
+    while not stop_event.is_set() and not camera_ready.is_set():
+        try:
+            await asyncio.wait_for(camera_ready.wait(), timeout=0.5)
+        except asyncio.TimeoutError:
+            continue
+
+    if stop_event.is_set():
+        return
+
     print("\n[EDITH GEMINI] Live vision is ready.")
     print("Ask a question about the camera view. Type 'exit' to stop.\n")
 
@@ -241,9 +267,14 @@ async def run_live_vision():
     try:
         async with client.aio.live.connect(model=MODEL, config=config) as session:
             print("[EDITH GEMINI] Live API session connected.")
+            camera_ready = asyncio.Event()
             tasks = [
-                asyncio.create_task(send_camera_frames(session, frame_queue, stop_event)),
-                asyncio.create_task(send_user_text(session, stop_event)),
+                asyncio.create_task(
+                    send_camera_frames(session, frame_queue, stop_event, camera_ready)
+                ),
+                asyncio.create_task(
+                    send_user_text(session, stop_event, camera_ready)
+                ),
                 asyncio.create_task(receive_gemini_responses(session, stop_event)),
             ]
 
