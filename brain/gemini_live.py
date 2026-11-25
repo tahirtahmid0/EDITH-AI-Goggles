@@ -137,6 +137,7 @@ async def send_camera_frames(
     frames: queue.Queue,
     stop_event: threading.Event,
     camera_ready: asyncio.Event,
+    usage: dict,
 ):
     """Send the latest camera JPEG at a safe, approximately 1 FPS cadence."""
     loop = asyncio.get_running_loop()
@@ -157,6 +158,8 @@ async def send_camera_frames(
             video=types.Blob(data=frame, mime_type="image/jpeg")
         )
         sent += 1
+        usage["frames_sent"] += 1
+        usage["image_bytes_sent"] += len(frame)
         if sent <= 3 or sent % 30 == 0:
             print(f"[EDITH GEMINI] Sent {sent} camera frames.")
 
@@ -173,6 +176,7 @@ async def send_user_text(
     session,
     stop_event: threading.Event,
     camera_ready: asyncio.Event,
+    usage: dict,
 ):
     """Read typed questions only after camera frames reach the Live session."""
     print("\n[EDITH GEMINI] Waiting for the camera feed to initialise...")
@@ -204,6 +208,7 @@ async def send_user_text(
             return
 
         await session.send_realtime_input(text=question)
+        usage["questions_sent"] += 1
 
 
 async def receive_gemini_responses(session, stop_event: threading.Event):
@@ -247,6 +252,12 @@ async def run_live_vision():
     stream_url = get_camera_stream_url()
     frame_queue: queue.Queue = queue.Queue(maxsize=1)
     stop_event = threading.Event()
+    session_started = time.monotonic()
+    usage = {
+        "frames_sent": 0,
+        "image_bytes_sent": 0,
+        "questions_sent": 0,
+    }
     reader = threading.Thread(
         target=camera_reader,
         args=(stream_url, frame_queue, stop_event),
@@ -278,10 +289,12 @@ async def run_live_vision():
             camera_ready = asyncio.Event()
             tasks = [
                 asyncio.create_task(
-                    send_camera_frames(session, frame_queue, stop_event, camera_ready)
+                    send_camera_frames(
+                        session, frame_queue, stop_event, camera_ready, usage
+                    )
                 ),
                 asyncio.create_task(
-                    send_user_text(session, stop_event, camera_ready)
+                    send_user_text(session, stop_event, camera_ready, usage)
                 ),
                 asyncio.create_task(receive_gemini_responses(session, stop_event)),
             ]
@@ -301,7 +314,17 @@ async def run_live_vision():
         stop_event.set()
         reader.join(timeout=3.0)
         await client.aio.aclose()
+        elapsed = max(0.0, time.monotonic() - session_started)
+        image_mib = usage["image_bytes_sent"] / (1024 * 1024)
         print("[EDITH GEMINI] Session closed.")
+        print("\n========== EDITH SESSION USAGE ==========")
+        print(f"Session duration: {elapsed / 60:.1f} minutes")
+        print(f"Camera frames sent: {usage['frames_sent']:,}")
+        print(f"Image data sent: {image_mib:.2f} MiB")
+        print(f"Questions sent: {usage['questions_sent']:,}")
+        print("Note: These are local transmission counters, not Google's")
+        print("billable token totals or remaining free-tier quota.")
+        print("========================================")
 
 
 def main():
@@ -313,8 +336,13 @@ def main():
         asyncio.run(run_live_vision())
     except KeyboardInterrupt:
         print("\n[EDITH GEMINI] Shutdown requested.")
-    except Exception:
+    except Exception as exc:
         print("\n[EDITH GEMINI ERROR]")
+        if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
+            print(
+                "[EDITH GEMINI] Google reported a quota/rate-limit error. "
+                "Check this project's current limits in Google AI Studio."
+            )
         traceback.print_exc()
 
 
