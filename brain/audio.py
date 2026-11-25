@@ -447,7 +447,8 @@ _SCENE_DESCRIPTION_PHRASES = (
 _VISUAL_QUESTION_MARKERS = (
     "what colour", "what color", "colour of", "color of",
     "wearing", "holding", "how many", "is there", "are there",
-    "what is this", "what's this", "what does",
+    "what is this", "what's this", "what is that", "what's that",
+    "what does", "does the", "does it", "is the", "is it", "are the",
     "what is on", "what's on", "what is in", "what's in",
     "what is behind", "what's behind", "behind the",
     "next to", "beside", "near the", "where is the", "where is a",
