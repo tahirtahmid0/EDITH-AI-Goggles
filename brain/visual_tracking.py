@@ -1,4 +1,4 @@
-""""EDITH local visual tracking engine.
+"""EDITH local visual tracking engine.
 
 Runs YOLO11 + ByteTrack against the ESP32-CAM MJPEG stream.
 Writes event records to a JSONL file and does not touch the existing SQLite memory.
