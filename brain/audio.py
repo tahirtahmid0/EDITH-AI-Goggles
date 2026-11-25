@@ -531,14 +531,14 @@ def close_gemini_live():
         assistant.close()
 
 
-def answer_with_gemini(command):
-    """Send a natural-language request to the persistent Gemini Live session."""
+def answer_with_gemini(command, audio_data=None):
+    """Send a natural-language request and, when available, its original microphone audio."""
     if _GEMINI_ASSISTANT is None:
         return False
 
     try:
         print("[EDITH GEMINI] Sending request with the live camera context...")
-        result = _GEMINI_ASSISTANT.ask(command)
+        result = _GEMINI_ASSISTANT.ask(command, audio_data=audio_data)
         if not result or not result.get("text"):
             print("[EDITH GEMINI] No transcript returned; falling back to local AI.")
             return False
@@ -622,10 +622,10 @@ def build_visual_question_prompt(command):
     )
 
 
-def answer_live_visual_question(command):
+def answer_live_visual_question(command, audio_data=None):
     """Prefer Gemini's live camera context; retain Moondream as local fallback."""
     if _GEMINI_ASSISTANT is not None:
-        if answer_with_gemini(command):
+        if answer_with_gemini(command, audio_data=audio_data):
             return
 
     speak("Give me a moment. I'm checking the image.")
@@ -974,7 +974,7 @@ def get_visual_event_response(command):
 
 
 
-def process_command(text):
+def process_command(text, audio_data=None):
     """
     Interpret recognised speech and execute the appropriate EDITH command.
     """
@@ -1206,7 +1206,7 @@ def process_command(text):
             else:
 
                 if is_visual_question(command):
-                    answer_live_visual_question(command)
+                    answer_live_visual_question(command, audio_data=audio_data)
                     return
 
                 response = "I couldn't find that in my memories."
@@ -1461,10 +1461,10 @@ def process_command(text):
 
     elif is_visual_question(command):
 
-        answer_live_visual_question(command)
+        answer_live_visual_question(command, audio_data=audio_data)
 
     else:
-        if not answer_with_gemini(text):
+        if not answer_with_gemini(text, audio_data=audio_data):
             print("[EDITH] Gemini is unavailable and no local command matched.")
             speak("I couldn't process that request right now.")
 
@@ -1635,7 +1635,7 @@ def transcription_worker():
                     print("[EDITH MEMORY] Could not save user message:", error)
 
                 # Process the recognised command.
-                process_command(text)
+                process_command(text, audio_data=audio_data)
 
                 last_activity_time = time.monotonic()
 
