@@ -58,6 +58,7 @@ YOLO_IMAGE_SIZE = 640
 load_dotenv(BASE_DIR / ".env")
 
 CAMERA_URL = os.getenv("CAMERA_URL")
+LOCAL_IMAGE_PATH = os.getenv("EDITH_IMAGE_PATH")
 
 # Persistent HTTP connection to the ESP32-CAM.
 CAMERA_SESSION = requests.Session()
@@ -105,11 +106,60 @@ def release_torch_memory(device):
 
 
 
+def capture_local_image():
+    """Load a local image for Mac-only development without an ESP32-CAM."""
+    global CURRENT_MEMORY_ID
+
+    if not LOCAL_IMAGE_PATH:
+        raise ValueError("EDITH_IMAGE_PATH is not configured in .env")
+
+    image_path = Path(LOCAL_IMAGE_PATH).expanduser()
+
+    if not image_path.is_file():
+        raise FileNotFoundError(
+            f"Local test image does not exist: {image_path}"
+        )
+
+    with Image.open(image_path) as source:
+        image = source.convert("RGB")
+
+    try:
+        width, height = image.size
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=92)
+        image_bytes = buffer.getvalue()
+    finally:
+        image.close()
+
+    INPUT_PATH.write_bytes(image_bytes)
+
+    try:
+        CURRENT_MEMORY_ID = memory.save_visual_memory(
+            image_bytes,
+            source="local_test"
+        )
+    except Exception as error:
+        CURRENT_MEMORY_ID = None
+        print("[EDITH MEMORY] Could not archive local test image:", error)
+
+    print(f"[EDITH] Using local test image: {image_path}")
+    print(f"[EDITH] Image dimensions: {width} x {height}")
+    print(f"[EDITH] Image size: {len(image_bytes)} bytes")
+
+    if CURRENT_MEMORY_ID is not None:
+        print(f"[EDITH MEMORY] Memory ID: {CURRENT_MEMORY_ID}")
+
+    return image_bytes
+
+
 def capture_image():
 
     global CURRENT_MEMORY_ID
 
     CURRENT_MEMORY_ID = None
+
+    if LOCAL_IMAGE_PATH:
+        return capture_local_image()
 
     print("\n[EDITH] Connecting to camera...")
 
