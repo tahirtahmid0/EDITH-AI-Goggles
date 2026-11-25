@@ -9,7 +9,7 @@ EDITH's YOLO11, Moondream, audio, or SQLite memory pipelines.
 - Keeps only the newest camera frame in a one-frame queue, avoiding a backlog.
 - Sends JPEG frames to Gemini Live at approximately 1 frame per second (the
   Live API video-input limit).
-- Accepts typed questions in the terminal and prints Gemini's text responses.
+- Accepts typed questions in the terminal and prints Gemini's response transcription as text.
 - Uses the existing `CAMERA_URL` in `.env` to derive the stream address,
   unless `CAMERA_STREAM_URL` is explicitly configured.
 
@@ -41,7 +41,7 @@ CAMERA_STREAM_URL=http://YOUR_ESP32_CAM_IP:81/stream
 Optional model override:
 
 ```dotenv
-GEMINI_LIVE_MODEL=gemini-3.8-live
+GEMINI_LIVE_MODEL=gemini-3.1-flash-live-preview
 ```
 
 ## Run
@@ -58,8 +58,9 @@ shutdown.
 
 ## Notes and limitations
 
-- This first version is text-in/text-out at the terminal. It does not connect
-  to EDITH's existing microphone or speaker pipeline.
+- This first version accepts typed prompts and prints the transcription of
+  Gemini's spoken response. It does not connect to EDITH's existing microphone
+  or speaker pipeline or play Gemini's generated audio.
 - The camera itself can stream faster; only the frames sent to Gemini are
   throttled to the Live API's approximately 1 FPS video limit.
 - Gemini Live is a preview API and model availability, limits, and SDK behavior
