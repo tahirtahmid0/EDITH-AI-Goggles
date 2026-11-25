@@ -24,7 +24,7 @@ from google.genai import types
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
-MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.8-live")
+MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")
 FRAME_INTERVAL_SECONDS = 1.05  # Live API video input is limited to 1 FPS.
 JPEG_MAX_BUFFER_BYTES = 2_000_000
 
@@ -187,11 +187,13 @@ async def receive_gemini_responses(session, stop_event: threading.Event):
         if not content:
             continue
 
-        model_turn = content.model_turn
-        if model_turn:
-            for part in model_turn.parts:
-                if part.text:
-                    print(f"\n[EDITH / GEMINI] {part.text}", flush=True)
+        # Live models return audio; request and display its text transcription.
+        if content.output_transcription and content.output_transcription.text:
+            print(
+                f"\n[EDITH / GEMINI] {content.output_transcription.text}",
+                end="",
+                flush=True,
+            )
 
         if content.turn_complete:
             print("\n[EDITH GEMINI] Response complete.\n", flush=True)
@@ -221,7 +223,8 @@ async def run_live_vision():
 
     client = genai.Client(api_key=api_key)
     config = types.LiveConnectConfig(
-        response_modalities=[types.Modality.TEXT],
+        response_modalities=[types.Modality.AUDIO],
+        output_audio_transcription=types.AudioTranscriptionConfig(),
         system_instruction=types.Content(
             parts=[types.Part(text=SYSTEM_INSTRUCTION)]
         ),
