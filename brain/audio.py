@@ -11,6 +11,7 @@ import sys
 import random
 import traceback
 import tempfile
+import atexit
 
 import re
 from visual_event_memory import load_events, search_events, get_recent_events
@@ -120,6 +121,19 @@ def speak(text):
     speaking.set()
 
     try:
+
+        output_mode = os.getenv("EDITH_TTS_OUTPUT", "esp32").strip().lower()
+
+        if output_mode in ("console", "silent", "none", "off"):
+            return
+
+        if output_mode == "local":
+            subprocess.run(
+                ["/usr/bin/say", text],
+                check=True,
+                timeout=60
+            )
+            return
 
         # ======================================
         # GENERATE SPEECH USING MACOS TTS
@@ -276,14 +290,72 @@ def respond(text):
     speak(text)
 
 
+# ==========================================
+# MANAGED MOONDREAM SESSION
+# ==========================================
+
+_MOONDREAM_LOCK = threading.RLock()
+_MOONDREAM_SESSION = None
+_MOONDREAM_UNLOAD_TIMER = None
+
+try:
+    MOONDREAM_IDLE_SECONDS = max(
+        15,
+        int(os.getenv("EDITH_MOONDREAM_IDLE_SECONDS", "120"))
+    )
+except ValueError:
+    MOONDREAM_IDLE_SECONDS = 120
+
+
+def close_moondream_session():
+    """Release Moondream safely when idle or before loading YOLO."""
+    global _MOONDREAM_SESSION, _MOONDREAM_UNLOAD_TIMER
+
+    with _MOONDREAM_LOCK:
+        if _MOONDREAM_UNLOAD_TIMER is not None:
+            _MOONDREAM_UNLOAD_TIMER.cancel()
+            _MOONDREAM_UNLOAD_TIMER = None
+
+        session = _MOONDREAM_SESSION
+        _MOONDREAM_SESSION = None
+
+        if session is not None:
+            print("[EDITH] Releasing cached Moondream session...")
+            session.close()
+
+
+def _get_moondream_session():
+    global _MOONDREAM_SESSION
+
+    if _MOONDREAM_SESSION is None:
+        print("[EDITH] Creating a lazy Moondream session...")
+        _MOONDREAM_SESSION = MoondreamSession()
+
+    return _MOONDREAM_SESSION
+
+
+def _schedule_moondream_unload():
+    global _MOONDREAM_UNLOAD_TIMER
+
+    if _MOONDREAM_UNLOAD_TIMER is not None:
+        _MOONDREAM_UNLOAD_TIMER.cancel()
+
+    _MOONDREAM_UNLOAD_TIMER = threading.Timer(
+        MOONDREAM_IDLE_SECONDS,
+        close_moondream_session
+    )
+    _MOONDREAM_UNLOAD_TIMER.daemon = True
+    _MOONDREAM_UNLOAD_TIMER.start()
+
+
 def understand_scene_with_updates(image, question):
     """
-    Run Moondream in a background thread while EDITH
-    periodically provides spoken progress updates.
+    Ask Moondream using one managed session.
+
+    The model stays available for follow-up questions, then unloads after
+    an idle timeout or immediately before YOLO is run to protect Mac RAM.
     """
-
     completed = threading.Event()
-
     result_data = {}
     error_data = {}
 
@@ -295,81 +367,155 @@ def understand_scene_with_updates(image, question):
     ]
 
     def moondream_worker():
-
-        session = None
-
         try:
+            print("[EDITH] Starting Moondream analysis...")
 
-            print("[EDITH] Starting background Moondream analysis...")
-
-            session = MoondreamSession()
-
-            result_data["result"] = understand_scene(
-                image,
-                question=question,
-                session=session
-            )
+            with _MOONDREAM_LOCK:
+                session = _get_moondream_session()
+                result_data["result"] = understand_scene(
+                    image,
+                    question=question,
+                    session=session
+                )
+                _schedule_moondream_unload()
 
         except Exception as error:
-
             error_data["error"] = error
             error_data["traceback"] = traceback.format_exc()
+            close_moondream_session()
 
         finally:
-
-            # Signal that generation has finished.
             completed.set()
-
-            if session is not None:
-
-                try:
-                    session.close()
-
-                except Exception as error:
-                    print(
-                        "[EDITH ERROR] Moondream cleanup failed:",
-                        error
-                    )
 
     worker = threading.Thread(
         target=moondream_worker,
         name="EDITH-Moondream",
         daemon=True
     )
-
     worker.start()
 
     message_index = 0
 
-    # Wait for Moondream while periodically speaking.
     while not completed.wait(timeout=15):
-
-        if completed.is_set():
-            break
-
-        message = progress_messages[
-            message_index % len(progress_messages)
-        ]
-
+        message = progress_messages[message_index % len(progress_messages)]
         message_index += 1
-
         print("[EDITH] Providing a progress update.")
-
         speak(message)
 
-    # Ensure the worker has completed its cleanup.
     worker.join()
 
     if "error" in error_data:
-
         print("[EDITH ERROR] Moondream analysis failed:")
         print(error_data["traceback"])
-
         raise RuntimeError(
-            "Moondream could not complete the scene analysis."
+            "Moondream could not complete the visual analysis."
         ) from error_data["error"]
 
     return result_data["result"]
+
+
+def run_object_detection(image):
+    """Run YOLO only after releasing Moondream to limit memory pressure."""
+    with _MOONDREAM_LOCK:
+        close_moondream_session()
+        return vision.detect_objects(image)
+
+
+atexit.register(close_moondream_session)
+
+
+# ==========================================
+# VISUAL QUESTION ROUTING
+# ==========================================
+
+_SCENE_DESCRIPTION_PHRASES = (
+    "describe the object in front of me",
+    "describe what's in front of me",
+    "describe what is in front of me",
+    "describe what you can see",
+    "describe my surroundings",
+    "describe the scene",
+    "describe this scene",
+    "what's in front of me",
+    "what is in front of me",
+    "tell me what's in front of me",
+    "tell me what is in front of me",
+    "tell me what i'm looking at",
+    "what am i looking at",
+)
+
+_VISUAL_QUESTION_MARKERS = (
+    "what colour", "what color", "colour of", "color of",
+    "wearing", "holding", "how many", "is there", "are there",
+    "what is this", "what's this", "what does",
+    "what is on", "what's on", "what is in", "what's in",
+    "what is behind", "what's behind", "behind the",
+    "next to", "beside", "near the", "where is the", "where is a",
+    "where is my", "can you see", "identify", "describe",
+    "what is the person", "what's the person",
+    "what is the object", "what's the object",
+)
+
+
+def is_visual_question(command):
+    """Return True for current-image questions, not historical memory queries."""
+    normalised = command.lower().strip()
+
+    if not normalised:
+        return False
+
+    return (
+        any(phrase in normalised for phrase in _SCENE_DESCRIPTION_PHRASES)
+        or any(marker in normalised for marker in _VISUAL_QUESTION_MARKERS)
+    )
+
+
+def build_visual_question_prompt(command):
+    """Build a grounded Moondream prompt for either a scene or specific query."""
+    normalised = command.lower().strip()
+
+    if any(phrase in normalised for phrase in _SCENE_DESCRIPTION_PHRASES):
+        return (
+            "Describe the scene in one or two concise sentences. "
+            "Identify only objects and details clearly visible in the image. "
+            "Do not give advice or recommendations. Do not invent details. "
+            "If something is unclear, say so."
+        )
+
+    return (
+        f"The user's question is: {command}\n"
+        "Answer that question directly using only details clearly visible "
+        "in this image. Do not guess, infer hidden details, or invent objects. "
+        "If the image does not provide enough evidence, say that you cannot "
+        "tell from this image. Keep the answer concise and conversational."
+    )
+
+
+def answer_live_visual_question(command):
+    """Capture the configured image source and answer with Moondream."""
+    speak("Give me a moment. I'm checking the image.")
+    print("[EDITH] Answering a live visual question:", command)
+
+    try:
+        image = capture_image()
+        result = understand_scene_with_updates(
+            image,
+            question=build_visual_question_prompt(command)
+        )
+        answer = result.get("scene_description", "").strip()
+
+        if not answer:
+            answer = "I couldn't determine that from the image."
+
+        print("[EDITH MOONDREAM] Answer:", answer)
+        respond(answer)
+
+    except Exception as error:
+        print("[EDITH ERROR] Visual question failed:", error)
+        respond(
+            "I couldn't analyse the image. Please check the image source "
+            "and try again."
+        )
 
 
 
@@ -1129,7 +1275,7 @@ def process_command(text):
         image = capture_image()
 
         if image:
-            detection_result = detect_objects(image)
+            detection_result = run_object_detection(image)
 
             display_results(detection_result)
 
@@ -1174,96 +1320,53 @@ def process_command(text):
 
     # ==========================================
 
-    elif any(phrase in command for phrase in [
+    elif is_visual_question(command):
 
-        "describe the object in front of me",
-
-        "describe what's in front of me",
-
-        "describe what is in front of me",
-
-        "describe what you can see",
-
-        "describe my surroundings",
-
-        "describe the scene",
-
-        "describe this scene",
-
-        "what's in front of me",
-
-        "what is in front of me",
-
-        "tell me what's in front of me",
-
-        "tell me what is in front of me",
-
-        "tell me what i'm looking at",
-
-        "what am i looking at"
-
-    ]):
-
-        speak("Just a moment. I'm analysing the scene.")
-
-        print("[EDITH] Let me take a closer look...")
-
-        image = capture_image()
-
-        if image:
-
-            try:
-
-                result = understand_scene_with_updates(
-
-                    image,
-
-                    question=(
-
-                        "What objects can you actually see in this image? "
-
-                        "Describe the scene in one or two short sentences. "
-
-                        "Only describe things that are clearly visible. "
-
-                        "Do not give advice, instructions, or recommendations. "
-
-                        "Do not make up details. "
-
-                        "If you cannot identify something, say so."
-
-                    )
-
-                )
-
-                print("\n[EDITH] Scene description:")
-
-                print(result["scene_description"])
-
-                respond(result["scene_description"])
-
-
-            except Exception as error:
-
-                print("[EDITH ERROR] Scene analysis failed:", error)
-
-                respond(
-
-                    "I'm sorry, I couldn't finish analysing the scene."
-
-                )
-
-
-        else:
-
-            print("[EDITH] I couldn't capture an image.")
-
-            respond("I couldn't capture an image.")
-
+        answer_live_visual_question(command)
 
     else:
         print("[EDITH] I don't recognise that command yet.")
         speak("I don't recognise that command yet.")
+
+
+
+def run_text_mode():
+    """Run EDITH from the Mac terminal without microphone or ESP32 hardware."""
+    os.environ.setdefault("EDITH_TTS_OUTPUT", "local")
+
+    print("\n========================================")
+    print("       EDITH MAC DESKTOP MODE")
+    print("========================================")
+    print("Type a command as if you were speaking to EDITH.")
+    print("Set EDITH_IMAGE_PATH in .env to use a local image.")
+    print("Type 'exit' to finish.\n")
+
+    try:
+        while True:
+            try:
+                command = input("[YOU] ").strip()
+            except EOFError:
+                break
+
+            if command.lower() in ("exit", "quit", "stop"):
+                break
+
+            if not command:
+                continue
+
+            try:
+                process_command(command)
+            except Exception as error:
+                print("[EDITH DESKTOP] Command failed:", error)
+                traceback.print_exc()
+
+    except KeyboardInterrupt:
+        print("\n[EDITH] Desktop session interrupted.")
+
+    finally:
+        close_moondream_session()
+        print("[EDITH] Desktop session ended.")
+
 
 
 # ==========================================
