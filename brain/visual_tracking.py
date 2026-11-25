@@ -24,8 +24,10 @@ from ultralytics import YOLO
 #   python brain/visual_tracking.py (including IDE Run configurations)
 if __package__:
     from .gemini_live import get_camera_stream_url, iter_mjpeg_frames
+    from .identity_manager import IdentityManager
 else:
     from gemini_live import get_camera_stream_url, iter_mjpeg_frames
+    from identity_manager import IdentityManager
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -52,6 +54,7 @@ class VisualTracker:
         self.events_path = events_path
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
         self.active: dict[int, dict[str, Any]] = {}
+        self.identity_manager = IdentityManager()
         self.timings: list[dict[str, float]] = []
 
     def record(self, event_type: str, track_id: int, **details: Any) -> None:
@@ -93,6 +96,7 @@ class VisualTracker:
         now = time.monotonic()
         seen_ids: set[int] = set()
         observations: list[dict[str, Any]] = []
+        self.identity_manager.begin_frame()
 
         if boxes is not None and boxes.id is not None:
             coordinates = boxes.xyxy.cpu().tolist()
@@ -117,7 +121,29 @@ class VisualTracker:
                     "bbox": [round(value, 1) for value in (x1, y1, x2, y2)],
                     "center": [round(center[0], 1), round(center[1], 1)],
                 }
+                identity = self.identity_manager.assign(observation, image.size, now)
+                observation.update(identity)
                 observations.append(observation)
+
+                if identity["identity_match"] == "reconnected":
+                    self.record(
+                        "identity_reassociated",
+                        track_id,
+                        class_name=class_name,
+                        visual_identity_id=identity["visual_identity_id"],
+                        previous_track_id=identity.get("previous_track_id"),
+                        match_score=identity["identity_score"],
+                    )
+                elif identity["identity_match"] == "uncertain_new":
+                    self.record(
+                        "identity_possible_match",
+                        track_id,
+                        class_name=class_name,
+                        visual_identity_id=identity["visual_identity_id"],
+                        possible_match_to=identity["possible_match_to"],
+                        match_score=identity["identity_score"],
+                        note="Kept as a separate identity because the match was not strong enough",
+                    )
 
                 if previous is None:
                     self.active[track_id] = {
@@ -132,6 +158,8 @@ class VisualTracker:
                         confidence=observation["confidence"],
                         center=observation["center"],
                         bbox=observation["bbox"],
+                        visual_identity_id=identity["visual_identity_id"],
+                        identity_match=identity["identity_match"],
                     )
                 else:
                     previous["last_seen"] = now
@@ -150,6 +178,7 @@ class VisualTracker:
                             from_center=[round(anchor[0], 1), round(anchor[1], 1)],
                             to_center=observation["center"],
                             displacement_px=round(distance, 1),
+                            visual_identity_id=identity["visual_identity_id"],
                         )
                         previous["last_event_center"] = center
 
@@ -168,6 +197,7 @@ class VisualTracker:
                 track_id,
                 class_name=state["class_name"],
                 last_seen_seconds_ago=round(now - state["last_seen"], 1),
+                visual_identity_id=self.identity_manager.identity_for_track(track_id),
             )
 
         bookkeeping_ms = (time.perf_counter() - bookkeeping_started) * 1000
