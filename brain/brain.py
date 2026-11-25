@@ -31,7 +31,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "models"
 TEMP_DIR = BASE_DIR / "temp"
 
-YOLO_MODEL_PATH = MODELS_DIR / "yolo" / "yolo11s.pt"
+YOLO_MODEL_PATH = MODELS_DIR / "yolo" / "yolo11n.pt"
 INPUT_PATH = TEMP_DIR / "edith_input.jpg"
 
 # ==========================================
@@ -244,7 +244,7 @@ def detect_objects(image):
     device = get_device()
 
     print("[EDITH] Selected device:", device)
-    print("[EDITH] Loading YOLO11s...")
+    print("[EDITH] Loading YOLO11n...")
 
     model = None
     results = None

@@ -12,6 +12,8 @@ import random
 import traceback
 import tempfile
 
+import re
+from visual_event_memory import load_events, search_events, get_recent_events
 from datetime import datetime, date
 from pathlib import Path
 from collections import deque
@@ -74,7 +76,7 @@ TEMP_DIR = BASE_DIR / "temp"
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-import brain as vision
+from brain import brain as vision
 
 capture_image = vision.capture_image
 detect_objects = vision.detect_objects
@@ -274,6 +276,103 @@ def respond(text):
     speak(text)
 
 
+def understand_scene_with_updates(image, question):
+    """
+    Run Moondream in a background thread while EDITH
+    periodically provides spoken progress updates.
+    """
+
+    completed = threading.Event()
+
+    result_data = {}
+    error_data = {}
+
+    progress_messages = [
+        "I'm still examining the image.",
+        "I'm checking the visual details carefully.",
+        "Almost there. I'm putting everything together.",
+        "I'm taking a closer look at the scene."
+    ]
+
+    def moondream_worker():
+
+        session = None
+
+        try:
+
+            print("[EDITH] Starting background Moondream analysis...")
+
+            session = MoondreamSession()
+
+            result_data["result"] = understand_scene(
+                image,
+                question=question,
+                session=session
+            )
+
+        except Exception as error:
+
+            error_data["error"] = error
+            error_data["traceback"] = traceback.format_exc()
+
+        finally:
+
+            # Signal that generation has finished.
+            completed.set()
+
+            if session is not None:
+
+                try:
+                    session.close()
+
+                except Exception as error:
+                    print(
+                        "[EDITH ERROR] Moondream cleanup failed:",
+                        error
+                    )
+
+    worker = threading.Thread(
+        target=moondream_worker,
+        name="EDITH-Moondream",
+        daemon=True
+    )
+
+    worker.start()
+
+    message_index = 0
+
+    # Wait for Moondream while periodically speaking.
+    while not completed.wait(timeout=15):
+
+        if completed.is_set():
+            break
+
+        message = progress_messages[
+            message_index % len(progress_messages)
+        ]
+
+        message_index += 1
+
+        print("[EDITH] Providing a progress update.")
+
+        speak(message)
+
+    # Ensure the worker has completed its cleanup.
+    worker.join()
+
+    if "error" in error_data:
+
+        print("[EDITH ERROR] Moondream analysis failed:")
+        print(error_data["traceback"])
+
+        raise RuntimeError(
+            "Moondream could not complete the scene analysis."
+        ) from error_data["error"]
+
+    return result_data["result"]
+
+
+
 def get_object_position(detection):
 
     x1, y1, x2, y2 = detection["bbox"]
@@ -375,6 +474,223 @@ def format_memory_date(timestamp, exact=False):
     except Exception as error:
         print("[EDITH MEMORY] Date formatting error:", error)
         return "at an earlier time"
+
+
+
+def get_visual_event_response(command):
+    """
+    Retrieve and format historical visual tracking events.
+
+    Returns None when the command is not a tracking-history question.
+    """
+
+    command = command.lower().strip()
+
+    event_keywords = [
+        "move", "moved", "moving", "movement",
+        "appear", "appeared", "appearance",
+        "disappear", "disappeared", "disappearance",
+        "vanish", "vanished",
+        "what happened recently",
+        "what happened to",
+        "has anything changed",
+        "did anything change",
+        "tracking history",
+        "visual history"
+    ]
+
+    if not any(keyword in command for keyword in event_keywords):
+        return None
+
+    # Identify the requested event type.
+    if any(word in command for word in [
+        "disappear", "disappeared", "disappearance",
+        "vanish", "vanished"
+    ]):
+        event_type = "object_disappeared"
+
+    elif any(word in command for word in [
+        "appear", "appeared", "appearance"
+    ]):
+        event_type = "object_appeared"
+
+    elif any(word in command for word in [
+        "move", "moved", "moving", "movement"
+    ]):
+        event_type = "object_moved"
+
+    else:
+        event_type = None
+
+    # Identify an object class mentioned by the user.
+    all_events = load_events()
+
+    known_classes = {
+        event.get("class_name")
+        for event in all_events
+        if event.get("class_name")
+    }
+
+    selected_class = None
+
+    for class_name in sorted(known_classes, key=len, reverse=True):
+
+        readable_name = class_name.replace("_", " ")
+
+        if re.search(
+            r"\b" + re.escape(readable_name) + r"\b",
+            command
+        ):
+            selected_class = class_name
+            break
+
+    # Retrieve matching records.
+    if selected_class or event_type:
+
+        events = search_events(
+            class_name=selected_class,
+            event_type=event_type,
+            limit=20
+        )
+
+    else:
+        events = get_recent_events(limit=20)
+
+    if not events:
+
+        if selected_class:
+            return (
+                f"I couldn't find any recent tracking events "
+                f"for the {selected_class.replace('_', ' ')}."
+            )
+
+        return "I couldn't find any matching events in my visual tracking history."
+
+    # Convert timestamps to local time.
+    def parse_event_time(timestamp):
+
+        try:
+            return datetime.fromisoformat(timestamp).astimezone()
+        except (TypeError, ValueError):
+            return None
+
+    # Sort oldest first for a natural chronological explanation.
+    events = sorted(
+        events,
+        key=lambda event: parse_event_time(event.get("timestamp"))
+        or datetime.min.astimezone()
+    )
+
+    # Remove exact duplicate records.
+    unique_events = []
+    seen_events = set()
+
+    for event in events:
+
+        event_key = (
+            event.get("timestamp"),
+            event.get("event"),
+            event.get("class_name"),
+            event.get("visual_identity_id"),
+            event.get("displacement_px")
+        )
+
+        if event_key not in seen_events:
+            seen_events.add(event_key)
+            unique_events.append(event)
+
+    # Select the three most recent events, then present them chronologically.
+    local_timezone = datetime.now().astimezone().tzinfo
+
+    unique_events.sort(
+        key=lambda event: (
+                parse_event_time(event.get("timestamp"))
+                or datetime.min.replace(tzinfo=local_timezone)
+        ),
+        reverse=True
+    )
+
+    unique_events = list(reversed(unique_events[:3]))
+
+    # Describe the selected events.
+    descriptions = []
+
+    for event in unique_events:
+
+        object_name = event.get(
+            "class_name", "object"
+        ).replace("_", " ")
+
+        event_name = event.get("event")
+
+        event_datetime = parse_event_time(
+            event.get("timestamp")
+        )
+
+        if event_datetime:
+            timestamp = (
+                event_datetime.strftime("%B ")
+                + str(event_datetime.day)
+                + " at "
+                + event_datetime.strftime("%I:%M %p").lstrip("0")
+            )
+        else:
+            timestamp = "an earlier time"
+
+        if event_name == "object_moved":
+
+            displacement = event.get("displacement_px")
+
+            if isinstance(displacement, (int, float)):
+                description = (
+                    f"The {object_name} moved approximately "
+                    f"{displacement:.0f} pixels"
+                )
+            else:
+                description = f"The {object_name} was detected moving"
+
+        elif event_name == "object_appeared":
+            description = (
+                f"A {object_name} appeared in my camera view"
+            )
+
+        elif event_name == "object_disappeared":
+            description = (
+                f"My tracker stopped detecting the {object_name}"
+            )
+
+        else:
+            continue
+
+        descriptions.append(
+            f"{description} at {timestamp}"
+        )
+
+        if len(descriptions) >= 3:
+            break
+
+    if not descriptions:
+        return (
+            "I found tracking records, but couldn't interpret "
+            "their event details."
+        )
+
+    if len(descriptions) == 1:
+        return (
+            "According to my visual tracking history, "
+            + descriptions[0]
+            + "."
+        )
+
+    response = (
+        "According to my visual tracking history, "
+        + "; then, ".join(descriptions)
+        + "."
+    )
+
+    return response
+
+
 
 
 def process_command(text):
@@ -769,6 +1085,20 @@ def process_command(text):
     # COMMAND 1: GREETING
     # ==========================================
 
+    # ==========================================
+    # COMMAND: VISUAL TRACKING MEMORY
+    # ==========================================
+
+    event_response = get_visual_event_response(command)
+
+    if event_response is not None:
+
+        print("[EDITH VISUAL MEMORY] Response:", event_response)
+
+        respond(event_response)
+
+        return
+
     if any(phrase in command for phrase in [
         "hi edith",
         "hello edith",
@@ -838,20 +1168,40 @@ def process_command(text):
     # COMMAND 3: SCENE DESCRIPTION
     # ==========================================
 
+    # ==========================================
+
+    # COMMAND 3: SCENE DESCRIPTION
+
+    # ==========================================
+
     elif any(phrase in command for phrase in [
+
         "describe the object in front of me",
+
         "describe what's in front of me",
+
         "describe what is in front of me",
+
         "describe what you can see",
+
         "describe my surroundings",
+
         "describe the scene",
+
         "describe this scene",
+
         "what's in front of me",
+
         "what is in front of me",
+
         "tell me what's in front of me",
+
         "tell me what is in front of me",
+
         "tell me what i'm looking at",
+
         "what am i looking at"
+
     ]):
 
         speak("Just a moment. I'm analysing the scene.")
@@ -861,32 +1211,55 @@ def process_command(text):
         image = capture_image()
 
         if image:
-            session = MoondreamSession()
 
             try:
-                result = understand_scene(
+
+                result = understand_scene_with_updates(
+
                     image,
+
                     question=(
+
                         "What objects can you actually see in this image? "
+
                         "Describe the scene in one or two short sentences. "
+
                         "Only describe things that are clearly visible. "
+
                         "Do not give advice, instructions, or recommendations. "
+
                         "Do not make up details. "
+
                         "If you cannot identify something, say so."
-                    ),
-                    session=session
+
+                    )
+
                 )
 
                 print("\n[EDITH] Scene description:")
+
                 print(result["scene_description"])
+
                 respond(result["scene_description"])
 
-            finally:
-                session.close()
+
+            except Exception as error:
+
+                print("[EDITH ERROR] Scene analysis failed:", error)
+
+                respond(
+
+                    "I'm sorry, I couldn't finish analysing the scene."
+
+                )
+
 
         else:
+
             print("[EDITH] I couldn't capture an image.")
+
             respond("I couldn't capture an image.")
+
 
     else:
         print("[EDITH] I don't recognise that command yet.")
