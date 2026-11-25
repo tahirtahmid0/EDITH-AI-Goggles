@@ -1,12 +1,14 @@
-"""EDITH experimental Gemini Live vision backend.
+"""EDITH's integrated Gemini Live assistant.
 
-This module is deliberately standalone: it does not import or modify the
-existing YOLO11, Moondream, audio, or SQLite pipelines.
+Streams the newest camera frame to Gemini Live at the API's 1 FPS limit.
+Text commands are sent through the same persistent session. Gemini returns
+native audio plus an output transcript; audio playback is handled by audio.py.
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import queue
 import threading
@@ -17,6 +19,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from dotenv import load_dotenv
+from PIL import Image
 from google import genai
 from google.genai import types
 
@@ -24,20 +27,23 @@ from google.genai import types
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
-MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")
-FRAME_INTERVAL_SECONDS = 1.05  # Live API video input is limited to 1 FPS.
+MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-3.8-live").strip()
+FRAME_INTERVAL_SECONDS = 1.05
 JPEG_MAX_BUFFER_BYTES = 2_000_000
 
-SYSTEM_INSTRUCTION = """You are EDITH's live visual understanding system.
-You receive JPEG frames from a wearable camera. Describe only what is
-reasonably visible, distinguish observations from guesses, and pay attention
-to changes in object positions and the scene over time. When the user asks a
-question, answer using the most recent frames and relevant visual context.
-Do not claim to see details that are too small, obscured, or uncertain."""
+SYSTEM_INSTRUCTION = """You are EDITH, a practical, observant wearable AI assistant.
+You receive a live camera feed and questions from the wearer. Treat the newest
+camera frames as the source of truth. Describe only details that are clearly
+visible. Never invent objects, locations, people, actions, or context. If a
+detail is unclear or outside the camera view, say that you cannot tell.
+Distinguish direct observations from uncertainty. Be concise, conversational,
+and useful. Remember the conversation within this live session. Do not claim
+to have performed actions or accessed memories unless the user-facing system
+has actually provided that information."""
 
 
 def get_camera_stream_url() -> str:
-    """Use an explicit stream URL, or derive it from EDITH's existing capture URL."""
+    """Use an explicit stream URL or derive the ESP32-CAM stream endpoint."""
     stream_url = os.getenv("CAMERA_STREAM_URL", "").strip()
     if stream_url:
         return stream_url
@@ -45,28 +51,22 @@ def get_camera_stream_url() -> str:
     capture_url = os.getenv("CAMERA_URL", "").strip()
     if not capture_url:
         raise RuntimeError(
-            "Set CAMERA_STREAM_URL in .env, or set CAMERA_URL so EDITH can "
-            "derive the ESP32-CAM stream address."
+            "Set CAMERA_STREAM_URL or CAMERA_URL in .env, or set "
+            "EDITH_IMAGE_PATH to use a local test image."
         )
 
     parsed = urlsplit(capture_url)
     if not parsed.scheme or not parsed.hostname:
         raise RuntimeError("CAMERA_URL is not a valid HTTP URL.")
 
-    # Preserve the host, but use the ESP32-CAM MJPEG server on port 81.
     host = parsed.hostname
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
-    netloc = f"{host}:81"
-    return urlunsplit((parsed.scheme, netloc, "/stream", "", ""))
+    return urlunsplit((parsed.scheme, f"{host}:81", "/stream", "", ""))
 
 
 def iter_mjpeg_frames(url: str, stop_event: threading.Event):
-    """Yield complete JPEG frames from a multipart MJPEG HTTP response.
-
-    JPEG marker extraction avoids depending on a particular multipart boundary
-    string, while keeping memory bounded if the connection becomes malformed.
-    """
+    """Yield complete JPEG frames from an MJPEG response."""
     with requests.get(
         url,
         stream=True,
@@ -86,7 +86,6 @@ def iter_mjpeg_frames(url: str, stop_event: threading.Event):
             while True:
                 start = buffer.find(b"\xff\xd8")
                 if start < 0:
-                    # Keep a possible split marker at the end of the buffer.
                     if len(buffer) > 1:
                         del buffer[:-1]
                     break
@@ -99,31 +98,63 @@ def iter_mjpeg_frames(url: str, stop_event: threading.Event):
                         raise RuntimeError("MJPEG frame exceeded the safety buffer limit.")
                     break
 
-                frame = bytes(buffer[start : end + 2])
-                del buffer[: end + 2]
+                frame = bytes(buffer[start:end + 2])
+                del buffer[:end + 2]
                 yield frame
 
 
-def camera_reader(url: str, frames: queue.Queue, stop_event: threading.Event):
-    """Continuously read MJPEG and retain only the newest frame."""
-    print(f"[EDITH GEMINI] Connecting to camera stream: {url}")
+def _put_latest(frames: queue.Queue, frame: bytes) -> None:
+    try:
+        frames.put_nowait(frame)
+    except queue.Full:
+        try:
+            frames.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            frames.put_nowait(frame)
+        except queue.Full:
+            pass
+
+
+def camera_reader(
+    frames: queue.Queue,
+    stop_event: threading.Event,
+) -> None:
+    """Read the live MJPEG stream or repeatedly refresh a local test image."""
+    image_path = os.getenv("EDITH_IMAGE_PATH", "").strip()
+
+    if image_path:
+        path = Path(image_path).expanduser()
+        print(f"[EDITH GEMINI] Using local image source: {path}")
+        while not stop_event.is_set():
+            try:
+                with Image.open(path) as source:
+                    image = source.convert("RGB")
+                    buffer = io.BytesIO()
+                    image.save(buffer, format="JPEG", quality=90)
+                    _put_latest(frames, buffer.getvalue())
+            except Exception as exc:
+                print(f"[EDITH GEMINI] Local image error: {exc}")
+                stop_event.wait(2.0)
+                continue
+            stop_event.wait(FRAME_INTERVAL_SECONDS)
+        return
+
+    try:
+        stream_url = get_camera_stream_url()
+    except Exception as exc:
+        print(f"[EDITH GEMINI] Camera source unavailable: {exc}")
+        stop_event.set()
+        return
+
+    print(f"[EDITH GEMINI] Connecting to camera stream: {stream_url}")
     while not stop_event.is_set():
         try:
-            for frame in iter_mjpeg_frames(url, stop_event):
+            for frame in iter_mjpeg_frames(stream_url, stop_event):
                 if stop_event.is_set():
                     break
-                # Drop stale frames so Gemini always receives a recent image.
-                try:
-                    frames.put_nowait(frame)
-                except queue.Full:
-                    try:
-                        frames.get_nowait()
-                    except queue.Empty:
-                        pass
-                    try:
-                        frames.put_nowait(frame)
-                    except queue.Full:
-                        pass
+                _put_latest(frames, frame)
         except Exception as exc:
             if not stop_event.is_set():
                 print(f"[EDITH GEMINI] Camera stream error: {exc}")
@@ -132,218 +163,259 @@ def camera_reader(url: str, frames: queue.Queue, stop_event: threading.Event):
     print("[EDITH GEMINI] Camera reader stopped.")
 
 
-async def send_camera_frames(
-    session,
-    frames: queue.Queue,
-    stop_event: threading.Event,
-    camera_ready: asyncio.Event,
-    usage: dict,
-):
-    """Send the latest camera JPEG at a safe, approximately 1 FPS cadence."""
-    loop = asyncio.get_running_loop()
-    sent = 0
-    next_send = loop.time()
+class GeminiLiveAssistant:
+    """Synchronous interface to one persistent asynchronous Gemini Live session."""
 
-    while not stop_event.is_set():
-        try:
-            frame = await asyncio.to_thread(frames.get, True, 2.0)
-        except queue.Empty:
-            continue
+    def __init__(self, api_key: str | None = None):
+        self.api_key = (api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        self.model = MODEL
+        self._requests: queue.Queue = queue.Queue()
+        self._ready = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._startup_error: Exception | None = None
+        self._active_request = None
+        self._ask_lock = threading.Lock()
+        self._client = None
 
-        delay = next_send - loop.time()
-        if delay > 0:
-            await asyncio.sleep(delay)
+    def start(self, timeout: float = 50.0) -> None:
+        if not self.api_key:
+            raise RuntimeError("GEMINI_API_KEY is missing from .env.")
+        if self._thread and self._thread.is_alive():
+            if self._startup_error:
+                raise RuntimeError(str(self._startup_error))
+            return
 
-        await session.send_realtime_input(
-            video=types.Blob(data=frame, mime_type="image/jpeg")
+        self._thread = threading.Thread(
+            target=self._thread_main,
+            name="edith-gemini-live",
+            daemon=True,
         )
-        sent += 1
-        usage["frames_sent"] += 1
-        usage["image_bytes_sent"] += len(frame)
-        if sent <= 3 or sent % 30 == 0:
-            print(f"[EDITH GEMINI] Sent {sent} camera frames.")
+        self._thread.start()
 
-        # Do not let the user ask visual questions until several real frames
-        # have successfully been sent to Gemini.
-        if sent >= 3 and not camera_ready.is_set():
-            camera_ready.set()
-            print("[EDITH GEMINI] Camera feed confirmed; visual questions enabled.")
+        if not self._ready.wait(timeout):
+            self.close()
+            raise TimeoutError(
+                "Gemini Live did not become ready. Check the camera source, "
+                "network connection, and API access."
+            )
+        if self._startup_error:
+            raise RuntimeError(f"Gemini Live startup failed: {self._startup_error}")
 
-        next_send = loop.time() + FRAME_INTERVAL_SECONDS
-
-
-async def send_user_text(
-    session,
-    stop_event: threading.Event,
-    camera_ready: asyncio.Event,
-    usage: dict,
-):
-    """Read typed questions only after camera frames reach the Live session."""
-    print("\n[EDITH GEMINI] Waiting for the camera feed to initialise...")
-
-    while not stop_event.is_set() and not camera_ready.is_set():
+    def _thread_main(self) -> None:
         try:
-            await asyncio.wait_for(camera_ready.wait(), timeout=0.5)
-        except asyncio.TimeoutError:
-            continue
+            asyncio.run(self._run_session())
+        except Exception as exc:
+            self._startup_error = exc
+            self._ready.set()
+            if not self._stop.is_set():
+                print(f"[EDITH GEMINI] Session error: {exc}")
+                traceback.print_exc()
 
-    if stop_event.is_set():
-        return
-
-    print("\n[EDITH GEMINI] Live vision is ready.")
-    print("Ask a question about the camera view. Type 'exit' to stop.\n")
-
-    while not stop_event.is_set():
-        try:
-            question = await asyncio.to_thread(input, "[YOU] ")
-        except (EOFError, KeyboardInterrupt):
-            stop_event.set()
-            return
-
-        question = question.strip()
-        if not question:
-            continue
-        if question.lower() in {"exit", "quit", "stop"}:
-            stop_event.set()
-            return
-
-        await session.send_realtime_input(text=question)
-        usage["questions_sent"] += 1
-
-
-async def receive_gemini_responses(session, stop_event: threading.Event):
-    """Keep receiving Live API events across multiple completed response turns."""
-    while not stop_event.is_set():
-        # The SDK receive iterator can finish at the end of a response turn.
-        # Re-enter it so the same Live session remains available for the next
-        # question instead of treating one answer as session completion.
-        async for response in session.receive():
-            content = response.server_content
-            if not content:
+    async def _send_frames(
+        self,
+        session,
+        frames: queue.Queue,
+        camera_ready: threading.Event,
+    ) -> None:
+        sent = 0
+        while not self._stop.is_set():
+            try:
+                frame = await asyncio.to_thread(frames.get, True, 2.0)
+            except queue.Empty:
                 continue
 
-            # Live models return audio; request and display its text transcription.
-            if content.output_transcription and content.output_transcription.text:
-                print(
-                    f"\n[EDITH / GEMINI] {content.output_transcription.text}",
-                    end="",
-                    flush=True,
+            await session.send_realtime_input(
+                video=types.Blob(data=frame, mime_type="image/jpeg")
+            )
+            sent += 1
+            if sent <= 3 or sent % 30 == 0:
+                print(f"[EDITH GEMINI] Camera frames sent: {sent}")
+            if sent >= 3 and not camera_ready.is_set():
+                camera_ready.set()
+                print("[EDITH GEMINI] Live camera feed confirmed.")
+
+            await asyncio.sleep(0)
+
+    async def _send_questions(self, session) -> None:
+        while not self._stop.is_set():
+            try:
+                request = await asyncio.to_thread(
+                    self._requests.get, True, 0.5
                 )
+            except queue.Empty:
+                continue
 
-            if content.turn_complete:
-                print("\n[EDITH GEMINI] Response complete.\n", flush=True)
-
-            if stop_event.is_set():
+            if request is None:
                 return
 
-        if not stop_event.is_set():
-            # Avoid a tight loop if the receive iterator ends between turns.
-            await asyncio.sleep(0.05)
+            self._active_request = request
+            try:
+                await session.send_realtime_input(text=request["question"])
+            except Exception as exc:
+                request["error"] = exc
+                request["done"].set()
+                self._active_request = None
+                raise
 
+    async def _receive_responses(self, session) -> None:
+        while not self._stop.is_set():
+            async for response in session.receive():
+                content = response.server_content
+                if content is None:
+                    continue
 
-async def run_live_vision():
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError(
-            "GEMINI_API_KEY is missing. Add it to your local .env file; "
-            "never commit the key to GitHub."
+                request = self._active_request
+                if request is not None:
+                    transcript = getattr(content, "output_transcription", None)
+                    if transcript and transcript.text:
+                        request["text_parts"].append(transcript.text)
+
+                    model_turn = getattr(content, "model_turn", None)
+                    if model_turn:
+                        for part in model_turn.parts:
+                            inline_data = getattr(part, "inline_data", None)
+                            if inline_data and inline_data.data:
+                                request["audio_parts"].append(inline_data.data)
+
+                    if getattr(content, "turn_complete", False):
+                        request["result"] = {
+                            "text": "".join(request["text_parts"]).strip(),
+                            "audio": b"".join(request["audio_parts"]),
+                        }
+                        request["done"].set()
+                        self._active_request = None
+
+                if self._stop.is_set():
+                    return
+
+            if not self._stop.is_set():
+                await asyncio.sleep(0.05)
+
+    async def _run_session(self) -> None:
+        frames: queue.Queue = queue.Queue(maxsize=1)
+        camera_ready = threading.Event()
+        reader = threading.Thread(
+            target=camera_reader,
+            args=(frames, self._stop),
+            name="edith-gemini-camera",
+            daemon=True,
+        )
+        reader.start()
+
+        self._client = genai.Client(
+            api_key=self.api_key,
+            http_options=types.HttpOptions(api_version="v1beta"),
+        )
+        config = types.LiveConnectConfig(
+            response_modalities=[types.Modality.AUDIO],
+            output_audio_transcription=types.AudioTranscriptionConfig(),
+            system_instruction=types.Content(
+                parts=[types.Part(text=SYSTEM_INSTRUCTION)]
+            ),
         )
 
-    stream_url = get_camera_stream_url()
-    frame_queue: queue.Queue = queue.Queue(maxsize=1)
-    stop_event = threading.Event()
-    session_started = time.monotonic()
-    usage = {
-        "frames_sent": 0,
-        "image_bytes_sent": 0,
-        "questions_sent": 0,
-    }
-    reader = threading.Thread(
-        target=camera_reader,
-        args=(stream_url, frame_queue, stop_event),
-        name="edith-gemini-camera",
-        daemon=True,
-    )
-    reader.start()
+        print(f"[EDITH GEMINI] Connecting to {self.model}...")
+        try:
+            async with self._client.aio.live.connect(
+                model=self.model,
+                config=config,
+            ) as session:
+                print("[EDITH GEMINI] Persistent Live session connected.")
+                tasks = [
+                    asyncio.create_task(self._send_frames(session, frames, camera_ready)),
+                    asyncio.create_task(self._send_questions(session)),
+                    asyncio.create_task(self._receive_responses(session)),
+                ]
 
-    client = genai.Client(
-        api_key=api_key,
-        # Gemini Live API is currently available on v1beta, while google-genai 3.x
-        # defaults the Gemini Developer API to v1.
-        http_options=types.HttpOptions(api_version="v1beta"),
-    )
-    config = types.LiveConnectConfig(
-        response_modalities=[types.Modality.AUDIO],
-        output_audio_transcription=types.AudioTranscriptionConfig(),
-        system_instruction=types.Content(
-            parts=[types.Part(text=SYSTEM_INSTRUCTION)]
-        ),
-    )
-
-    print(f"[EDITH GEMINI] Connecting to model: {MODEL}")
-    print("[EDITH GEMINI] Video input is limited to approximately 1 FPS.")
-
-    try:
-        async with client.aio.live.connect(model=MODEL, config=config) as session:
-            print("[EDITH GEMINI] Live API session connected.")
-            camera_ready = asyncio.Event()
-            tasks = [
-                asyncio.create_task(
-                    send_camera_frames(
-                        session, frame_queue, stop_event, camera_ready, usage
+                camera_ok = await asyncio.to_thread(camera_ready.wait, 35.0)
+                if not camera_ok:
+                    raise TimeoutError(
+                        "Gemini connected, but no camera frames reached the session."
                     )
-                ),
-                asyncio.create_task(
-                    send_user_text(session, stop_event, camera_ready, usage)
-                ),
-                asyncio.create_task(receive_gemini_responses(session, stop_event)),
-            ]
+                self._ready.set()
 
-            done, pending = await asyncio.wait(
-                tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in done:
-                exception = task.exception()
-                if exception:
-                    raise exception
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-    finally:
-        stop_event.set()
-        reader.join(timeout=3.0)
-        await client.aio.aclose()
-        elapsed = max(0.0, time.monotonic() - session_started)
-        image_mib = usage["image_bytes_sent"] / (1024 * 1024)
-        print("[EDITH GEMINI] Session closed.")
-        print("\n========== EDITH SESSION USAGE ==========")
-        print(f"Session duration: {elapsed / 60:.1f} minutes")
-        print(f"Camera frames sent: {usage['frames_sent']:,}")
-        print(f"Image data sent: {image_mib:.2f} MiB")
-        print(f"Questions sent: {usage['questions_sent']:,}")
-        print("Note: These are local transmission counters, not Google's")
-        print("billable token totals or remaining free-tier quota.")
-        print("========================================")
+                stop_waiter = asyncio.create_task(asyncio.to_thread(self._stop.wait))
+                done, pending = await asyncio.wait(
+                    tasks + [stop_waiter],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    if task is stop_waiter or task.cancelled():
+                        continue
+                    error = task.exception()
+                    if error:
+                        raise error
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+        finally:
+            self._stop.set()
+            self._ready.set()
+            reader.join(timeout=3.0)
+            if self._client is not None:
+                await self._client.aio.aclose()
+                self._client = None
+
+    def ask(self, question: str, timeout: float = 90.0) -> dict | None:
+        """Send a question and return its transcript and native audio bytes."""
+        question = str(question).strip()
+        if not question or self._stop.is_set() or not self._ready.is_set():
+            return None
+        if self._startup_error:
+            raise RuntimeError(str(self._startup_error))
+
+        with self._ask_lock:
+            request = {
+                "question": question,
+                "done": threading.Event(),
+                "text_parts": [],
+                "audio_parts": [],
+                "result": None,
+                "error": None,
+            }
+            self._requests.put(request)
+            if not request["done"].wait(timeout):
+                print("[EDITH GEMINI] Response timed out.")
+                return None
+            if request["error"]:
+                raise RuntimeError(str(request["error"]))
+            return request["result"]
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            self._requests.put_nowait(None)
+        except queue.Full:
+            pass
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=10.0)
+        print("[EDITH GEMINI] Live session closed.")
 
 
-def main():
-    print("========================================")
-    print("       EDITH - GEMINI LIVE VISION")
-    print("       Experimental backend")
-    print("========================================")
+def main() -> None:
+    """Standalone diagnostic mode retained for direct module testing."""
+    assistant = GeminiLiveAssistant()
     try:
-        asyncio.run(run_live_vision())
+        assistant.start()
+        print("\nEDITH GEMINI LIVE")
+        print("The camera feed is active. Ask a question or type exit.\n")
+        while True:
+            question = input("[YOU] ").strip()
+            if question.lower() in {"exit", "quit", "stop"}:
+                break
+            if not question:
+                continue
+            result = assistant.ask(question)
+            if result and result.get("text"):
+                print(f"\n[EDITH / GEMINI] {result['text']}\n")
     except KeyboardInterrupt:
         print("\n[EDITH GEMINI] Shutdown requested.")
     except Exception as exc:
-        print("\n[EDITH GEMINI ERROR]")
-        if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
-            print(
-                "[EDITH GEMINI] Google reported a quota/rate-limit error. "
-                "Check this project's current limits in Google AI Studio."
-            )
+        print(f"[EDITH GEMINI ERROR] {exc}")
         traceback.print_exc()
+    finally:
+        assistant.close()
 
 
 if __name__ == "__main__":
