@@ -42,6 +42,7 @@ def main():
 
         if desktop_mode:
             os.environ.setdefault("EDITH_TTS_OUTPUT", "local")
+            startup_complete = True
             print("\n[EDITH] Starting Mac-only text command mode.")
             print("[EDITH] No microphone, ESP32-CAM or speaker is required.")
             audio.run_text_mode()
