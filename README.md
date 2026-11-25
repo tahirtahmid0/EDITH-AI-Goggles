@@ -1,396 +1,675 @@
-# EDITH --- AI-Powered Smart Glasses
+# EDITH — AI-Powered Smart Glasses
 
-> **EDITH** is an experimental wearable AI assistant built into a pair
-> of smart glasses. It combines computer vision, voice interaction, and
-> local long-term memory to help a wearer ask questions about their
-> surroundings and interact with an AI assistant hands-free.
-
-**Project status:** Science-fair prototype\
-**Production freeze:** 23 November 2026\
-**Demonstration date:** 28 November 2026
-
-------------------------------------------------------------------------
-
-## Project at a glance
-
-EDITH connects a camera and microphone system to a MacBook-based AI
-application. The camera provides images for visual analysis, while the
-ESP32 DevKit streams microphone audio to the computer. The computer
-handles speech recognition, AI processing, memory, and text-to-speech. A
-separate ESP32 audio path is prepared to receive speaker audio.
-
-### Reference images
-
-The following images document parts of the prototype electronics and its
-circuit design. They are not photographs of the final assembled glasses.
-
-```{=html}
 <p align="center">
-```
-`<img src="https://i.postimg.cc/zVFfzt54/20261122-221048.jpg" alt="EDITH ESP32 DevKit and breadboard prototype" width="700">`{=html}
-`<br>`{=html} `<em>`{=html}ESP32 DevKit and breadboard
-prototype.`</em>`{=html}
-```{=html}
+  <strong>A wearable, camera-aware AI assistant built with ESP32 hardware, Python, computer vision, and conversational AI.</strong>
 </p>
-```
-```{=html}
+
 <p align="center">
-```
-`<img src="https://i.postimg.cc/yJgBZv47/image.png" alt="EDITH electronics circuit reference diagram" width="700">`{=html}
-`<br>`{=html} `<em>`{=html}EDITH circuit reference
-diagram.`</em>`{=html}
-```{=html}
+  <img src="https://img.shields.io/badge/status-active%20prototype-orange" alt="Project status: active prototype">
+  <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python 3.12">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Apple%20Silicon-lightgrey" alt="macOS Apple Silicon">
+  <img src="https://img.shields.io/badge/vision-YOLO11%20%2B%20Moondream-green" alt="YOLO11 and Moondream">
+  <img src="https://img.shields.io/badge/conversation-Gemini%20Live-4285F4" alt="Gemini Live">
 </p>
+
+EDITH is an experimental smart-glasses project designed to let a wearer ask questions about the world around them, interact with an AI assistant, and build a record of selected visual events and memories.
+
+The system combines an **ESP32-CAM**, an **ESP32 DevKit with an I²S microphone**, and a **Mac-based Python application**. The computer handles AI inference, speech processing, conversation routing, and persistent memory. Gemini Live provides cloud-based conversational and visual understanding, while YOLO and Moondream provide local computer-vision capabilities.
+
+> **Project status:** Active engineering prototype. Hardware and software capabilities are at different stages of testing. This is not a certified assistive, safety, medical, or navigation device.
+
+---
+
+## Contents
+
+- [Highlights](#highlights)
+- [How the AI systems work together](#how-the-ai-systems-work-together)
+- [System architecture](#system-architecture)
+- [Hardware](#hardware)
+- [Software stack](#software-stack)
+- [Repository structure](#repository-structure)
+- [Getting started](#getting-started)
+- [Configuration](#configuration)
+- [Running EDITH](#running-edith)
+- [Example commands](#example-commands)
+- [Visual tracking and event memory](#visual-tracking-and-event-memory)
+- [Memory and privacy](#memory-and-privacy)
+- [Performance notes](#performance-notes)
+- [Testing](#testing)
+- [Known limitations and verification status](#known-limitations-and-verification-status)
+- [Safety](#safety)
+- [Roadmap](#roadmap)
+- [Acknowledgements](#acknowledgements)
+
+---
+
+## Highlights
+
+- **Gemini Live conversational AI** — a persistent Live API session for natural-language questions, camera-grounded answers, and native audio responses.
+- **Continuous visual context** — EDITH sends camera frames to Gemini Live at approximately one frame per second.
+- **YOLO11 object detection** — identifies supported object classes and estimates their positions in the image.
+- **Moondream 2 local vision** — provides local image question-answering when Gemini is unavailable or cannot return a usable response.
+- **Voice interaction pipeline** — ESP32 microphone audio is transported to the Mac, segmented with Silero VAD, and transcribed with Whisper.
+- **Two output paths** — local macOS speech output during desktop development, and a UDP/I²S path prepared for the ESP32 speaker.
+- **Persistent SQLite memory** — stores conversations, visual-memory records, and explicit user-approved memories.
+- **Visual event tracking** — YOLO tracking and ByteTrack produce timestamped object appearance, movement, and disappearance events.
+- **Mac-only development mode** — test the conversational pipeline with a local image without requiring the ESP32-CAM, microphone, or speaker hardware.
+
+## How the AI systems work together
+
+EDITH does not send every request to every model. Its command router selects a system based on the kind of request.
+
+| User request | Main handler | What happens |
+|---|---|---|
+| “What can you see?” / “Detect objects” | YOLO11 | Detects objects and reports their approximate image positions. |
+| “What colour is the hammer?” | Gemini Live | Answers a current-scene visual question using the streamed camera context. |
+| “Describe my surroundings.” | Gemini Live | Produces a concise description grounded in recent camera frames. |
+| Visual question when Gemini is unavailable | Moondream 2 | Captures an image and analyses it locally. |
+| “What did you see earlier?” | SQLite visual memory | Retrieves previously saved visual descriptions. |
+| “Remember that my laptop is silver.” | Explicit memory handler | Requests confirmation, then saves the memory locally. |
+| “Did anything move?” | Visual event memory | Searches the local tracking-event log. |
+| General conversation | Gemini Live | Handles conversational requests that do not match a local command. |
+
+### The role of each model
+
+**YOLO11 — detection and localisation**
+
+YOLO is the deterministic object-detection component. It returns detected classes and bounding boxes. EDITH uses those boxes to estimate whether an object is on the left, centre, or right, and in the upper, middle, or lower part of the image. Detection is not the same as understanding: YOLO does not provide the same open-ended reasoning as a vision-language model.
+
+The main detection pipeline currently loads `models/yolo/yolo11n.pt`. The separate visual-tracking program uses `models/yolo/yolo11s.pt`.
+
+**Gemini Live — primary conversational brain**
+
+When enabled and connected, Gemini Live handles general conversation and current-scene visual questions. EDITH maintains a persistent session and sends camera frames as visual context. Text questions and recorded audio inputs are sent through the same ordered session-input path. Gemini can return text and native audio.
+
+**Moondream 2 — local visual fallback**
+
+Moondream runs locally on the Mac through the project's PyTorch/Transformers stack. EDITH loads it lazily for a visual question when Gemini is unavailable or does not return a usable response. The model is released after an idle period and before YOLO detection to reduce memory pressure.
+
+**Important:** this is the routing implemented in the current code, not a claim that all three models run simultaneously. The Mac has limited unified memory, so the application deliberately manages local model loading.
+
+### Current command-routing flow
+
+```mermaid
+flowchart TD
+    A["User command"] --> B{"Memory or tracking-history request?"}
+    B -->|Yes| C["Local SQLite / JSONL memory"]
+    B -->|No| D{"Explicit object-detection request?"}
+    D -->|Yes| E["YOLO11 detection"]
+    D -->|No| F{"Current visual question?"}
+    F -->|Yes| G["Gemini Live"]
+    G -->|No usable response| H["Moondream local fallback"]
+    F -->|No| I["Gemini Live conversation"]
+    I -->|Unavailable| J["Fallback response"]
 ```
-> **Add the completed glasses photograph here:** once the final camera,
-> microphone, wiring, battery arrangement, and speaker assembly have
-> been mounted, add a photograph of the complete prototype to this
-> section.
 
-------------------------------------------------------------------------
-
-## What EDITH is designed to do
-
--   **Live conversational intelligence:** use Gemini Live for
-    camera-grounded, natural-language conversations and native spoken
-    responses.
--   **Object detection:** use YOLO11 to identify and locate objects in a
-    camera image.
--   **Local visual question answering:** use Moondream 2 as a local
-    fallback for detailed image analysis when Gemini Live is unavailable.
--   **Voice input:** receive microphone audio from an INMP441 microphone
-    connected to an ESP32 DevKit.
--   **Speech recognition:** use Whisper to transcribe spoken input.
--   **Voice activity detection:** use Silero VAD to help identify speech
-    segments.
--   **Spoken responses:** use macOS text-to-speech for the computer's
-    voice output.
--   **Long-term memory:** store and retrieve selected information and
-    interaction history using a local SQLite database.
--   **Automatic visual memory:** save captured images and associated
-    metadata locally.
-
-The feature set is intended for a controlled science-fair demonstration.
-EDITH is a prototype, not a certified assistive, safety, or navigation
-device.
-
-------------------------------------------------------------------------
+---
 
 ## System architecture
 
-EDITH uses a split architecture: the ESP32 boards handle sensor and
-audio transport, while the MacBook runs the main Python application and
-AI models.
+The prototype separates sensor transport from the AI application. The ESP32 boards handle camera, microphone, and speaker I/O. The Mac runs Python, model inference, speech processing, and memory.
 
-``` mermaid
+```mermaid
 flowchart TD
-    CAM["ESP32-CAM<br/>Camera capture"] -->|"Wi-Fi / HTTP GET /capture"| MAC["MacBook<br/>Python application"]
-    MIC["INMP441 microphone"] --> DEV["ESP32 DevKit"]
-    DEV -->|"Wi-Fi / UDP port 5005<br/>16 kHz, 16-bit PCM"| MAC
-    MAC --> VISION["Vision pipeline<br/>YOLO11 + Moondream 2"]
-    MAC --> AUDIO["Audio pipeline<br/>Silero VAD + Whisper"]
-    VISION --> CORE["EDITH application<br/>Conversation and commands"]
-    AUDIO --> CORE
-    CORE <--> MEMORY["SQLite memory<br/>and local image storage"]
-    CORE --> TTS["macOS text-to-speech"]
-    CORE -->|"Prepared speaker audio<br/>UDP port 5006"| DEV
-    DEV -->|"I²S output"| AMP["MAX98357A amplifier"]
-    AMP --> SPK["4 Ω, 3 W speaker"]
+    CAM["AI-Thinker ESP32-CAM"] -->|"Wi-Fi / HTTP MJPEG stream or capture"| MAC["MacBook · EDITH Python application"]
+    MIC["INMP441 I²S microphone"] --> DEV["ESP32 DevKit V1"]
+    DEV -->|"UDP · port 5005 · PCM"| MAC
+
+    MAC --> ROUTER["Command router"]
+    ROUTER --> YOLO["YOLO11 · object detection"]
+    ROUTER --> GEM["Gemini Live · conversation and vision"]
+    ROUTER --> MOON["Moondream 2 · local visual fallback"]
+    ROUTER --> MEM["SQLite memory"]
+    TRACK["YOLO + ByteTrack tracker"] --> EVENTS["JSONL visual event log"]
+    ROUTER <--> MEM
+    ROUTER <--> EVENTS
+
+    MAC -->|"macOS speech"| LOCAL["Local audio output"]
+    MAC -->|"UDP · port 5006 · PCM"| DEV
+    DEV -->|"I²S"| AMP["MAX98357A amplifier"]
+    AMP --> SPK["Speaker"]
 ```
 
 ### Data paths
 
-  -----------------------------------------------------------------------
-  Function                            Data path
-  ----------------------------------- -----------------------------------
-  Camera input                        ESP32-CAM → Wi-Fi HTTP → MacBook
+| Function | Data path |
+|---|---|
+| Gemini camera context | ESP32-CAM MJPEG stream → Python camera reader → Gemini Live |
+| Local image capture | ESP32-CAM `/capture` endpoint → Python vision pipeline |
+| Microphone input | INMP441 → ESP32 DevKit → UDP `5005` → Silero VAD → Whisper |
+| Gemini audio request | Recognised utterance's original 16 kHz PCM audio → Gemini Live |
+| Local visual analysis | Captured image → YOLO11 or Moondream |
+| Speaker output | Mac → UDP `5006` → ESP32 DevKit → I²S → amplifier → speaker |
+| Memory | Python application → SQLite database, image files, and JSONL event log |
 
-  Microphone input                    INMP441 → ESP32 DevKit → UDP `5005`
-                                      → MacBook
+The live Gemini camera reader and the local image-capture path are separate readers of the configured image source. For a real camera, the project uses the camera stream for Gemini Live and the configured capture endpoint for local analysis.
 
-  Speaker output path                 MacBook → UDP `5006` → ESP32 DevKit
-                                      → I²S → amplifier → speaker
-
-  Memory                              Python application → local SQLite
-                                      database and image directory
-  -----------------------------------------------------------------------
-
-The speaker path has been tested for UDP reception and I²S writes.
-Physical speaker playback remains pending installation and verification
-of the correct MAX98357A amplifier.
-
-------------------------------------------------------------------------
+---
 
 ## Hardware
 
 ### Main components
 
-  -----------------------------------------------------------------------
-  Component               Role                    Status
-  ----------------------- ----------------------- -----------------------
-  ESP32 DevKit V1         Microphone streaming    Firmware tested
-                          and speaker-audio       
-                          receiver                
+| Component | Role | Current development status |
+|---|---|---|
+| AI-Thinker ESP32-CAM | Camera capture and Wi-Fi image streaming | Camera firmware and stream tested |
+| ESP32 DevKit V1 | Microphone transport and speaker-audio receiver | Firmware communication paths tested |
+| INMP441 | I²S digital microphone | Microphone input tested |
+| MAX98357A | I²S audio amplifier | Correct module / final installation pending |
+| 4 Ω, 3 W speaker | Audio output | Final physical playback not yet verified |
+| Battery and power circuitry | Portable power | Power/boost assembly prepared |
 
-  AI-Thinker ESP32-CAM    Camera capture and HTTP Firmware tested
-                          image server            
+The battery is intended to be carried separately rather than mounted directly on the glasses. The final wearable assembly and its power arrangement must be checked before use.
 
-  INMP441                 I²S digital microphone  Working
+### Prototype reference images
 
-  MAX98357A               I²S digital audio       Correct module pending
-                          amplifier               purchase
+These images document parts of the electronics prototype and circuit design. They are not photographs of the completed glasses.
 
-  4 Ω, 3 W speaker        Audio output            Playback not yet
-                                                  verified
+<p align="center">
+  <img src="https://i.postimg.cc/zVFfzt54/20261122-221048.jpg" alt="EDITH ESP32 DevKit and breadboard prototype" width="720">
+  <br>
+  <em>ESP32 DevKit and breadboard prototype.</em>
+</p>
 
-  Battery and power       Portable power          Power/boost assembly
-  circuitry                                       already soldered
-  -----------------------------------------------------------------------
+<p align="center">
+  <img src="https://i.postimg.cc/yJgBZv47/image.png" alt="EDITH electronics circuit reference diagram" width="720">
+  <br>
+  <em>Electronics circuit reference diagram.</em>
+</p>
 
-The battery is intended to be carried in a pocket rather than mounted
-directly on the glasses. The glasses are intended for a science-fair
-demonstration, not use during laboratory work.
+A photograph of the completed glasses assembly can be added here after the final camera, microphone, wiring, battery arrangement, and speaker assembly have been mounted.
 
 ### ESP32 DevKit pin configuration
 
-**INMP441 microphone --- I²S 0**
+**INMP441 microphone — I²S input**
 
-  Signal         ESP32 GPIO
-  ------------ ------------
-  BCLK / SCK             26
-  WS / LRCL              25
-  DATA / SD              33
+| Signal | ESP32 GPIO |
+|---|---:|
+| BCLK / SCK | 26 |
+| WS / LRCL | 25 |
+| DATA / SD | 33 |
 
-**Speaker I²S output --- I²S 1**
+**Speaker — I²S output**
 
-  Signal         ESP32 GPIO
-  ------------ ------------
-  BCLK                   27
-  WS / LRCLK             14
-  DATA OUT               22
+| Signal | ESP32 GPIO |
+|---|---:|
+| BCLK | 27 |
+| WS / LRCLK | 14 |
+| DATA OUT | 22 |
 
-The microphone and speaker use separate I²S controllers. Their firmware
-tasks are independent.
+The microphone and speaker use separate I²S controllers in the current firmware design.
 
 ### Audio transport configuration
 
-  Setting                           Value
-  --------------------------------- ------------
-  Microphone sample rate            16,000 Hz
-  Microphone transmitted format     16-bit PCM
-  Microphone UDP destination port   `5005`
-  Speaker sample rate               16,000 Hz
-  Speaker input format              16-bit PCM
-  Speaker UDP listening port        `5006`
+| Setting | Value |
+|---|---|
+| Microphone sample rate | 16,000 Hz |
+| Microphone format | 16-bit PCM, mono |
+| Microphone UDP destination | Port `5005` |
+| Speaker sample rate | 16,000 Hz |
+| Speaker format | 16-bit PCM |
+| Speaker UDP listener | Port `5006` |
+| ESP32 speaker IP in current Python configuration | `10.0.100.41` |
 
-### ESP32-CAM
+The speaker IP is currently configured directly in `brain/audio.py`. If the DevKit receives a different local IP address, update the configuration in the code before testing speaker output.
 
--   Board: AI-Thinker ESP32-CAM
--   Image size: VGA, 640 × 480
--   Image format: JPEG
--   Connection: Wi-Fi
--   HTTP endpoint: `GET /capture`
--   Camera orientation: configured with vertical and horizontal flip in
-    firmware
+### ESP32-CAM configuration
 
-The MacBook application uses the `/capture` endpoint. Keep this endpoint
-unchanged unless the Python client is updated at the same time.
+- Board: AI-Thinker ESP32-CAM.
+- Camera image size in the local vision pipeline: 640 × 480.
+- Image format: JPEG.
+- Network: Wi-Fi.
+- Local capture endpoint: `GET /capture`.
+- Gemini Live stream: MJPEG endpoint, normally `/stream` on port `81`.
+- Camera orientation is configured in the camera firmware.
 
-------------------------------------------------------------------------
+The Python application uses `CAMERA_URL` for local image capture. Gemini Live can use `CAMERA_STREAM_URL`, or derive the stream endpoint from `CAMERA_URL` when no explicit stream URL is set.
 
-## Software and AI components
+---
 
-  Component                  Purpose
-  -------------------------- ---------------------------------------------------
-  Python 3.12                Main application runtime
-  PyTorch                    Machine-learning runtime
-  YOLO11s                    Object detection
-  Gemini Live                Live camera-grounded conversation and native audio
-  Moondream 2                Local visual question-answering fallback
-  Whisper                    Speech-to-text
-  Silero VAD                 Voice activity detection
-  macOS text-to-speech       Spoken assistant responses
-  SQLite                     Local structured memory
-  Arduino-ESP32 core 4.0.0   ESP32 firmware environment
+## Software stack
 
-The project has been developed and tested on an Apple MacBook Pro with
-an M1 chip and 8 GB unified memory. Actual performance can vary with
-model settings, image size, and background applications.
+| Technology | Purpose |
+|---|---|
+| Python 3.12 | Main application runtime |
+| PyTorch | Local model runtime |
+| Ultralytics YOLO | Object detection and tracking |
+| YOLO11n | Main object-detection model |
+| YOLO11s | Separate visual-tracking model |
+| Gemini Live API | Persistent conversational and visual AI |
+| Moondream 2 | Local image question-answering |
+| MLX Whisper | Speech-to-text on Apple Silicon |
+| Silero VAD | Voice activity detection |
+| SQLite | Structured local memory |
+| Pillow | Image loading and conversion |
+| Requests | Camera HTTP and MJPEG access |
+| python-dotenv | Local environment configuration |
+| Google GenAI SDK | Gemini Live API client |
 
-------------------------------------------------------------------------
+### Development environment
 
-## Project structure
+The primary development machine is an Apple MacBook Pro with an M1 chip and 8 GB of unified memory. Local inference uses Apple Metal Performance Shaders (MPS) when available and falls back to CPU otherwise.
 
-The main application is organised into the following areas:
+---
 
-``` text
-AI Goggles/
+## Repository structure
+
+The following is a guide to the main project files; optional firmware, model, test, and configuration files may vary by branch.
+
+```text
+EDITH-AI-Goggles/
 ├── brain/
-│   ├── main.py
-│   ├── audio.py
-│   ├── brain.py
-│   └── memory.py
-├── firmware/
-│   ├── edith_devkit_final.ino
-│   └── edith_camera_final.ino
+│   ├── __init__.py
+│   ├── main.py                  # Central application entry point
+│   ├── audio.py                 # Audio pipeline and command routing
+│   ├── brain.py                 # Camera capture, YOLO and Moondream
+│   ├── gemini_live.py           # Persistent Gemini Live session
+│   ├── memory.py                # SQLite memory system
+│   ├── visual_event_memory.py   # Visual tracking event queries
+│   ├── visual_tracking.py       # YOLO + ByteTrack tracking runner
+│   └── identity_manager.py      # Short-term visual identity matching
+├── configs/
+│   └── trackers/                # ByteTrack configuration
+├── firmware/                    # ESP32 firmware sketches, if present
 ├── models/
-│   └── yolo/
-│       ├── yolo11n.pt
-│       └── yolo11s.pt
-├── memory/
-│   ├── edith_memory.db
-│   └── images/
-├── temp/
-└── .env
+│   └── yolo/                    # Local YOLO model weights
+├── memory/                      # Local database, images and event log
+├── temp/                        # Temporary images and audio
+├── tests/
+│   ├── test_identity_manager.py
+│   └── test_visual_event_memory.py
+├── requirements.txt
+├── requirements-gemini.txt
+├── .env                         # Local configuration; never commit
+└── README.md
 ```
 
-The `firmware/` directory is the recommended archive location for the
-final ESP32 sketches. The exact contents of the local project may differ
-as development continues.
+### Important local-only data
 
-### Important local-only files
+The following files and directories may contain secrets, personal data, or large generated assets and should remain untracked:
 
-The following should remain local and should not be committed to a
-public or shared repository:
+- `.env` and files containing API keys or Wi-Fi credentials.
+- Virtual environments such as `.venv312/`.
+- SQLite databases and personal conversation history.
+- Saved images, camera captures, and audio recordings.
+- Generated logs and temporary files.
+- Downloaded model weights, unless the project explicitly intends to distribute them.
 
--   `.env` and any file containing API keys, Wi-Fi passwords, or other
-    secrets.
--   Python virtual environments such as `.venv312/`.
--   Personal conversation databases and saved visual memories.
--   Captured images that may contain people or private surroundings.
--   Temporary audio, logs, and test recordings.
+A `.gitignore` rule does not remove a secret that has already been committed. If a credential is exposed, revoke or rotate it.
 
-Use a `.gitignore` file to exclude these items. Do not rely on
-`.gitignore` alone if a sensitive file has already been staged or
-committed; remove it from the Git index and rotate any exposed
-credentials.
+---
 
-------------------------------------------------------------------------
+## Getting started
 
-## Gemini Live integration
+### 1. Clone the repository
 
-Gemini Live is the primary conversational model when a Gemini API key is
-configured. EDITH keeps its local command handlers: YOLO handles explicit
-object-detection requests, SQLite handles stored memories, and Moondream
-remains available as a local visual fallback. The camera feed is sent to
-Gemini at approximately one frame per second, matching the Live API limit.
-Whisper recognises speech for EDITH's local command routing. When a
-request is sent to Gemini, EDITH also forwards the original 16 kHz
-microphone PCM utterance alongside the live camera frames. Gemini's native
-audio response is played locally or streamed to the ESP32 speaker.
+```bash
+git clone git@github.com:tahirtahmid0/EDITH-AI-Goggles.git
+cd EDITH-AI-Goggles
+```
 
-Install the optional Gemini dependency in the existing virtual environment:
+To work on the current integration branch:
+
+```bash
+git switch gemini-live-integration
+git pull origin gemini-live-integration
+```
+
+### 2. Create and activate the Python environment
+
+On macOS with Python 3.12 installed:
+
+```bash
+python3.12 -m venv .venv312
+source .venv312/bin/activate
+python -m pip install --upgrade pip
+```
+
+### 3. Install the main dependencies
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+### 4. Install Gemini Live dependencies
+
+Gemini Live is kept in a separate requirements file:
 
 ```bash
 python -m pip install -r requirements-gemini.txt
 ```
 
-Add these settings to the local, untracked `.env` file. Keep the API key
-private and never commit it:
+### 5. Configure environment variables
 
-```env
-GEMINI_API_KEY=your_gemini_api_key
-GEMINI_LIVE_MODEL=gemini-3.8-live
-EDITH_GEMINI_LIVE_ENABLED=true
+Create a local `.env` file in the repository root. Add the settings needed for your chosen mode; examples are provided below.
+
+### 6. Add model weights
+
+The main YOLO detector expects:
+
+```text
+models/yolo/yolo11n.pt
 ```
 
-For Mac-only testing, set `EDITH_DESKTOP_MODE=true` and
-`EDITH_IMAGE_PATH=/absolute/path/to/test.jpg`. EDITH will repeatedly send
-that local image as its camera source. For the wearable, leave
-`EDITH_IMAGE_PATH` unset and configure `CAMERA_URL` or
-`CAMERA_STREAM_URL` for the ESP32-CAM.
+The separate tracking runner expects:
 
-## Setup overview
+```text
+models/yolo/yolo11s.pt
+```
 
-These instructions describe the intended setup. Exact package versions
-and any provider credentials should be taken from the project's current
-dependency and configuration files.
+Moondream is loaded through its configured Hugging Face model ID and may download model files on first use. Ensure the Mac has enough free storage and memory.
 
-1.  Install Python 3.12 and create a virtual environment.
-2.  Install the Python dependencies required by the application.
-3.  Configure local environment variables in `.env` without committing
-    that file.
-4.  Place the required model files in the expected `models/`
-    directories.
-5.  Flash the final DevKit firmware to the ESP32 DevKit V1.
-6.  Flash the final camera firmware to the AI-Thinker ESP32-CAM.
-7.  Configure the ESP32 boards and MacBook to use the same Wi-Fi
-    network.
-8.  Confirm the camera's `/capture` endpoint is reachable from the
-    MacBook.
-9.  Start the EDITH application using the project's configured entry
-    point.
+### 7. Check the camera connection
 
-**Network configuration:** the firmware and Python application must
-agree on the MacBook's local IP address, Wi-Fi network, and UDP ports.
-Do not publish Wi-Fi credentials or API keys in the repository.
+For the ESP32-CAM setup, confirm that the Mac can reach the camera's configured capture endpoint and MJPEG stream on the local network.
 
-------------------------------------------------------------------------
+---
 
-## Testing and verification record
+## Configuration
 
-The following functions have been exercised during prototype
-development:
+EDITH reads configuration from the repository-root `.env` file. Keep that file private and out of Git.
 
--   ESP32-CAM initialisation, Wi-Fi connection, HTTP server startup, and
-    VGA image capture.
--   Microphone I²S input and UDP transmission to the MacBook.
--   Speaker UDP packet reception and I²S writes on the DevKit.
--   Simultaneous microphone and speaker communication tasks.
--   Microphone clarity while speaker test packets are being received.
--   Wi-Fi disconnection and reconnection, followed by UDP socket
-    recovery.
--   Local memory storage and retrieval during software testing.
+### Mac-only desktop mode
 
-**Not yet verified:** physical speaker playback through the final
-MAX98357A amplifier and speaker assembly.
+This mode is intended for development when the ESP32-CAM, microphone, and speaker are unavailable. It accepts typed commands in the terminal and can use a local image as its camera source.
 
-Testing on a prototype does not guarantee reliability in every
-environment. Re-test the complete system after any firmware, wiring,
-power, network, or software change.
+```env
+EDITH_DESKTOP_MODE=true
+EDITH_TTS_OUTPUT=local
 
-------------------------------------------------------------------------
+EDITH_GEMINI_LIVE_ENABLED=true
+GEMINI_API_KEY=your_gemini_api_key
+GEMINI_LIVE_MODEL=gemini-3.8-live
 
-## Safety and limitations
+EDITH_IMAGE_PATH=/absolute/path/to/test.jpg
+```
 
--   EDITH is an educational prototype and is not a certified medical,
-    accessibility, industrial, or safety device.
--   Do not rely on its object detection or scene descriptions for
-    hazardous tasks.
--   Do not wear or operate the prototype during laboratory work.
--   Keep exposed conductors insulated and secure the battery and power
-    circuitry safely.
--   Avoid short circuits, loose wiring, and placing unprotected
-    electronics or batteries directly against skin.
--   Obtain permission before capturing or storing images or audio of
-    other people.
--   Keep credentials, personal memories, and private recordings out of
-    public repositories.
+- `EDITH_DESKTOP_MODE=true` selects the terminal text-command loop.
+- `EDITH_TTS_OUTPUT=local` uses macOS local speech output.
+- `EDITH_GEMINI_LIVE_ENABLED=true` enables the Gemini Live integration.
+- `GEMINI_API_KEY` is your private Google AI API key.
+- `GEMINI_LIVE_MODEL` selects the Live API model configured for the project.
+- `EDITH_IMAGE_PATH` points to a local test image. The local image is repeatedly supplied as the camera source.
 
-------------------------------------------------------------------------
+### ESP32 hardware mode
 
-## Project history
+For the wearable/hardware path, use settings similar to:
 
-EDITH was developed as a student science-fair engineering project. Its
-development involved integrating embedded hardware, wireless
-communication, computer vision, speech processing, and local memory into
-one wearable prototype.
+```env
+EDITH_DESKTOP_MODE=false
+EDITH_TTS_OUTPUT=esp32
 
-The production-freeze milestone is intended to preserve a known-working
-version before final physical assembly and demonstration preparation.
+EDITH_GEMINI_LIVE_ENABLED=true
+GEMINI_API_KEY=your_gemini_api_key
+GEMINI_LIVE_MODEL=gemini-3.8-live
 
-### Production archive
+CAMERA_URL=http://CAMERA_IP/capture
+# Optional explicit MJPEG stream URL:
+# CAMERA_STREAM_URL=http://CAMERA_IP:81/stream
+```
 
--   **Project:** EDITH --- AI-Powered Smart Glasses
--   **Release label:** `v1.0 — Science Fair Production`
--   **Production freeze:** 23 November 2026
--   **Science-fair demonstration:** 28 November 2026
+Replace `CAMERA_IP` with the ESP32-CAM's actual local IP address. Leave `EDITH_IMAGE_PATH` unset when using the physical camera. The ESP32 DevKit and Mac must be reachable on the same local network for the UDP audio transport.
 
-------------------------------------------------------------------------
+If Gemini is disabled or cannot connect, local command handlers remain available. Gemini-specific questions cannot use the cloud model until the connection is restored.
+
+### Output modes
+
+The `EDITH_TTS_OUTPUT` setting in `brain/audio.py` supports:
+
+| Value | Behaviour |
+|---|---|
+| `local` | Local macOS speech output |
+| `esp32` | Sends audio to the ESP32 speaker path |
+| `console`, `silent`, `none`, `off` | Suppresses speech playback |
+
+---
+
+## Running EDITH
+
+Activate the virtual environment first:
+
+```bash
+source .venv312/bin/activate
+```
+
+### Mac-only text mode
+
+Set `EDITH_DESKTOP_MODE=true` in `.env`, then run:
+
+```bash
+python brain/main.py
+```
+
+Type a command at the `[YOU]` prompt. Type `exit`, `quit`, or `stop` to close the session.
+
+### Hardware listening mode
+
+Set `EDITH_DESKTOP_MODE=false`, configure the ESP32 network and audio settings, and run:
+
+```bash
+python brain/main.py
+```
+
+The application loads Silero VAD, opens UDP port `5005`, and waits for microphone packets from the ESP32 DevKit.
+
+### Standalone visual tracking
+
+The tracking engine is a separate program from the main conversational application. Run it from the repository root:
+
+```bash
+python -m brain.visual_tracking
+```
+
+It reads the configured camera MJPEG stream, runs YOLO tracking, and appends events to the local JSONL event log. Tracking is configured conservatively for the M1 system; it is not automatically started by the main text-command mode.
+
+---
+
+## Example commands
+
+Try these in desktop mode with `EDITH_IMAGE_PATH` pointing to a suitable image:
+
+| Command | Expected handler |
+|---|---|
+| `Hello EDITH` | Local greeting |
+| `What can you see?` | YOLO object detection |
+| `Identify objects` | YOLO object detection |
+| `What colour is the object closest to the camera?` | Gemini Live, then Moondream if needed |
+| `Describe the scene` | Gemini Live, then Moondream if needed |
+| `What is beside the laptop?` | Gemini Live, then Moondream if needed |
+| `What did you see earlier?` | Local visual memory |
+| `Did anything move?` | Visual event memory |
+| `Remember that my laptop is silver` | Explicit memory confirmation flow |
+
+The exact result depends on image quality, camera angle, model capabilities, network conditions, and the availability of the relevant AI service.
+
+---
+
+## Visual tracking and event memory
+
+The standalone tracker uses Ultralytics YOLO tracking with ByteTrack to follow detected objects between frames. It records events such as:
+
+- Object appeared.
+- Object moved beyond the configured movement threshold.
+- Object disappeared after a configured absence interval.
+
+Each event includes a timestamp, tracking session ID, temporary track ID, object class, and relevant geometry. A visual identity manager attempts cautious short-term reconciliation when tracker IDs change. These IDs are **visual tracking labels**, not biometric identities or verified recognition of a person.
+
+The default event log is:
+
+```text
+memory/visual_tracking_events.jsonl
+```
+
+The event-memory module can load recent events and search by event type, class, visual identity, or tracking session. Session IDs help prevent temporary IDs from different tracker runs being confused.
+
+The event log is separate from the SQLite conversation and visual-memory database.
+
+---
+
+## Memory and privacy
+
+EDITH uses local SQLite storage for structured memories and conversation history. Its memory system includes:
+
+- **Conversation records** — user and assistant messages with timestamps.
+- **Visual memories** — captured image paths, capture times, scene descriptions, and detection metadata.
+- **Explicit memories** — information the user asks EDITH to remember, saved after confirmation.
+- **Visual tracking events** — a separate JSONL file containing timestamped object events.
+
+Memory is stored locally in the project's `memory/` directory by default. The directory may contain private images, conversation content, and other personal information. Do not publish it or upload it to a public repository.
+
+Gemini Live is a cloud service. Camera frames and requests sent to Gemini are transmitted to Google's service for processing. Do not use the system to capture other people or private spaces without appropriate permission. Review the relevant provider privacy terms before using the service with sensitive data.
+
+---
+
+## Performance notes
+
+The primary development computer has an Apple M1 chip and 8 GB of unified memory. Local machine-learning workloads share that memory with macOS and other applications.
+
+To reduce memory pressure:
+
+- Gemini Live is used as the primary cloud conversational model when enabled.
+- Moondream is loaded lazily rather than at application startup.
+- The Moondream session is released after its idle timeout.
+- The YOLO detection handler closes the Moondream session before loading YOLO.
+- The tracking engine runs independently and should not be started alongside other heavy local inference workloads on a memory-constrained machine unless performance has been checked.
+- Desktop mode avoids loading the Silero VAD model and does not require the physical microphone or speaker.
+
+A model being available in the code does not mean it is resident in memory. Actual resource use depends on which command is being processed.
+
+---
+
+## Testing
+
+Run the unit tests from the repository root with the virtual environment activated:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The test suite covers the visual identity manager and visual event-memory utilities. It does not replace an end-to-end test of the camera, Gemini API, microphone, speaker, or complete wearable assembly.
+
+For an end-to-end hardware check, test each path separately:
+
+1. ESP32-CAM Wi-Fi connection and image capture.
+2. MJPEG stream stability and frame delivery.
+3. Gemini Live session startup and camera-grounded question answering.
+4. YOLO detection using a captured frame.
+5. Moondream local analysis and model unloading.
+6. Microphone audio transport and Whisper transcription.
+7. Speaker UDP reception and physical audio playback.
+8. SQLite memory saving and retrieval.
+9. Visual tracking event creation and retrieval.
+
+---
+
+## Known limitations and verification status
+
+This project is actively developed. The following distinctions are important:
+
+| Area | Current status |
+|---|---|
+| Mac-only typed command mode | Tested |
+| Gemini Live persistent connection | Tested during desktop development |
+| Gemini Live camera-frame transmission | Tested during desktop development |
+| Gemini visual question response | Tested with a local image; answer quality still being improved |
+| Ordered Gemini session input | Implemented in the integration branch; continue end-to-end testing |
+| YOLO object detection | Integrated; model and image dependent |
+| Moondream local visual fallback | Integrated and exercised in desktop development |
+| SQLite memory | Integrated and exercised |
+| Visual tracking and event logging | Implemented as a separate runner |
+| ESP32-CAM capture and streaming | Firmware path tested during prototype development |
+| ESP32 microphone UDP path | Tested during prototype development |
+| ESP32 speaker UDP/I²S path | Receiver path tested; final physical playback not yet verified |
+| Completed wearable assembly | Still requires final physical verification |
+
+A successful connection or a log stating that frames were sent does not, by itself, prove that a model understood the image. Visual answers must be checked against the actual camera image.
+
+---
+
+## Troubleshooting
+
+**Gemini Live does not connect**
+
+- Confirm that `GEMINI_API_KEY` is set in the local `.env`.
+- Confirm that `EDITH_GEMINI_LIVE_ENABLED=true`.
+- Check internet access and the configured model name.
+- Install the optional dependency file in the active environment.
+
+**Gemini says it cannot see the image**
+
+- Check the log line identifying the selected image source.
+- Confirm that `EDITH_IMAGE_PATH` points to a valid image in desktop mode.
+- In hardware mode, check the MJPEG stream URL and confirm frames are being read.
+- Remember that frame-sent logs do not guarantee successful visual interpretation.
+
+**Moondream or YOLO uses too much memory**
+
+- Close other memory-intensive applications.
+- Avoid running the standalone tracker at the same time as other local inference tasks.
+- Allow the Moondream session to unload before running YOLO.
+- Do not repeatedly load local models when Gemini can handle the request.
+
+**The camera is unreachable**
+
+- Confirm that the Mac and ESP32-CAM are on the same network.
+- Check the camera's current IP address.
+- Test the configured `/capture` endpoint and MJPEG stream endpoint separately.
+- Verify that the firmware's ports match the Python configuration.
+
+**The ESP32 microphone is not detected**
+
+- Confirm the microphone wiring and I²S pin assignments.
+- Confirm that the DevKit sends 16 kHz, 16-bit mono PCM packets to UDP port `5005`.
+- Check the Mac's local network/firewall configuration.
+
+**The speaker is silent**
+
+- Confirm that the ESP32 DevKit is listening on UDP port `5006`.
+- Check the configured DevKit IP address in `brain/audio.py`.
+- Verify I²S wiring, amplifier power, speaker wiring, and the correct MAX98357A module.
+- UDP reception and I²S writes do not prove that the physical amplifier/speaker path works.
+
+---
+
+## Safety
+
+- EDITH is an educational prototype, not a certified safety, medical, accessibility, or navigation device.
+- Never rely on its object detection or AI descriptions for hazardous tasks.
+- Do not wear or operate the prototype during laboratory work.
+- Secure the battery and power circuitry; insulate exposed conductors.
+- Avoid short circuits, loose wiring, overheating, and unprotected electronics against skin.
+- Obtain permission before recording or storing images and audio of other people.
+- Keep API keys, Wi-Fi passwords, private images, and personal memories out of public repositories.
+- Cloud AI responses can be inaccurate. Verify important information independently.
+
+---
+
+## Roadmap
+
+The following are development goals, not claims that the features are already complete.
+
+- [x] ESP32-CAM image capture and Wi-Fi streaming prototype.
+- [x] ESP32 microphone audio transport prototype.
+- [x] Python speech pipeline with Silero VAD and Whisper.
+- [x] YOLO-based object detection.
+- [x] Moondream local visual question answering.
+- [x] SQLite conversation and visual memory.
+- [x] Gemini Live persistent-session integration.
+- [x] Standalone YOLO/ByteTrack visual event tracking.
+- [ ] Improve intent-aware coordination between YOLO, Gemini, and Moondream.
+- [ ] Verify robust visual question answering across varied scenes.
+- [ ] Complete and verify the physical speaker/amplifier path.
+- [ ] Finalise and test the wearable assembly and power management.
+- [ ] Run a complete end-to-end demonstration rehearsal.
+
+---
 
 ## Acknowledgements
 
-Built through experimentation, debugging, hardware integration, and
-software development.
+EDITH is a student engineering project built through experimentation across embedded systems, wireless communication, Python, machine learning, computer vision, speech processing, and AI integration.
 
-**EDITH --- an experiment in making AI wearable.**
+It brings together open-source tools and model ecosystems including Ultralytics, PyTorch, Hugging Face, MLX Whisper, Silero VAD, and the Google Gemini API.
+
+<p align="center">
+  <strong>EDITH — an experiment in making AI wearable.</strong>
+</p>
