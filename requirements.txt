@@ -1,0 +1,34 @@
+# EDITH AI Goggles - main Python dependencies
+# Target environment: Python 3.12 on macOS Apple Silicon (M1).
+#
+# The PyTorch / Torchvision pair below is the working combination
+# previously verified in EDITH's original .venv312 environment.
+
+# Core computer-vision and ML runtime
+torch==2.14.1
+torchvision==0.29.1
+ultralytics
+thop
+numpy
+Pillow>=11.0.0
+
+# Moondream 2 / Hugging Face model loading
+moondream==2.6.1
+transformers>=4.51.1
+accelerate>=1.10.0
+huggingface-hub==2.4.0
+kestrel==0.9.1
+kestrel-kernels==0.7.4
+kestrel-mps-torch-ext==0.1.2
+kestrel-native==0.1.8
+
+# Audio processing
+silero-vad==6.2.3
+mlx-whisper
+
+# HTTP camera access and local configuration
+requests
+python-dotenv
+
+# Gemini Live is kept separate in requirements-gemini.txt.
+# Install it with: python -m pip install -r requirements-gemini.txt
