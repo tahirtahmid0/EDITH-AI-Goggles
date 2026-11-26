@@ -39,7 +39,7 @@ const uint16_t SPEAKER_PORT = 5006;
 #define MIC_SAMPLE_RATE 16000
 #define MIC_BUFFER_SIZE 256
 
-I2SClass I2S;
+I2SClass I2S(I2S_NUM_0);
 WiFiUDP micUdp;
 
 int32_t rawSamples[MIC_BUFFER_SIZE];
@@ -428,11 +428,15 @@ void setup() {
     -1
   );
 
+  // Send each mono sample to BOTH I2S slots. MAX98357A breakout
+  // boards can be configured for left, right, or mixed input; using
+  // BOTH avoids silence when the amplifier is listening to the other slot.
   if (!SpeakerI2S.begin(
         I2S_MODE_STD,
         SPEAKER_SAMPLE_RATE,
         I2S_DATA_BIT_WIDTH_16BIT,
-        I2S_SLOT_MODE_MONO
+        I2S_SLOT_MODE_MONO,
+        I2S_STD_SLOT_BOTH
       )) {
 
     Serial.println("[FATAL] Speaker I2S initialisation failed!");
@@ -461,7 +465,7 @@ void setup() {
     "EDITH_Microphone",
     4096,
     nullptr,
-    2,
+    1,
     &micTaskHandle
   );
 
@@ -485,7 +489,7 @@ void setup() {
     "EDITH_Speaker",
     4096,
     nullptr,
-    2,
+    3,
     &speakerTaskHandle
   );
 
