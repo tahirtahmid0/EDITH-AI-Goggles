@@ -74,17 +74,26 @@ MODEL = "mlx-community/whisper-base-mlx"
 BASE_DIR = Path(__file__).resolve().parent.parent
 TEMP_DIR = BASE_DIR / "temp"
 
-# Ensure the project root takes precedence over the brain/ script directory.
-# When launched as "python brain/main.py", Python otherwise may resolve
-# brain.py as the top-level "brain" module instead of the brain package.
-project_root = str(BASE_DIR)
-sys.path[:] = [
-    path for path in sys.path
-    if os.path.abspath(path or os.getcwd()) != project_root
-]
-sys.path.insert(0, project_root)
+# Load the vision implementation under a private module name.
+# The project contains both a "brain" package directory and a brain.py file;
+# importing it as "brain" can make Python resolve the file as the package.
+import importlib.util
 
-from brain import brain as vision
+VISION_MODULE_NAME = "_edith_vision_brain"
+VISION_MODULE_PATH = Path(__file__).resolve().with_name("brain.py")
+VISION_SPEC = importlib.util.spec_from_file_location(
+    VISION_MODULE_NAME,
+    VISION_MODULE_PATH,
+)
+
+if VISION_SPEC is None or VISION_SPEC.loader is None:
+    raise ImportError(
+        f"Could not load EDITH vision module: {VISION_MODULE_PATH}"
+    )
+
+vision = importlib.util.module_from_spec(VISION_SPEC)
+sys.modules[VISION_MODULE_NAME] = vision
+VISION_SPEC.loader.exec_module(vision)
 
 capture_image = vision.capture_image
 detect_objects = vision.detect_objects
