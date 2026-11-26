@@ -74,8 +74,15 @@ MODEL = "mlx-community/whisper-base-mlx"
 BASE_DIR = Path(__file__).resolve().parent.parent
 TEMP_DIR = BASE_DIR / "temp"
 
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
+# Ensure the project root takes precedence over the brain/ script directory.
+# When launched as "python brain/main.py", Python otherwise may resolve
+# brain.py as the top-level "brain" module instead of the brain package.
+project_root = str(BASE_DIR)
+sys.path[:] = [
+    path for path in sys.path
+    if os.path.abspath(path or os.getcwd()) != project_root
+]
+sys.path.insert(0, project_root)
 
 from brain import brain as vision
 
