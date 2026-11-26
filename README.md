@@ -393,11 +393,11 @@ EDITH_IMAGE_PATH=/absolute/path/to/test.jpg
 
 ### ESP32 hardware mode
 
-For the wearable/hardware path, use settings similar to:
+For the wearable/camera/microphone path with audio played through the MacBook speakers, use settings similar to:
 
 ```env
 EDITH_DESKTOP_MODE=false
-EDITH_TTS_OUTPUT=esp32
+EDITH_TTS_OUTPUT=local
 
 EDITH_GEMINI_LIVE_ENABLED=true
 GEMINI_API_KEY=your_gemini_api_key
@@ -408,7 +408,7 @@ CAMERA_URL=http://CAMERA_IP/capture
 # CAMERA_STREAM_URL=http://CAMERA_IP:81/stream
 ```
 
-Replace `CAMERA_IP` with the ESP32-CAM's actual local IP address. Leave `EDITH_IMAGE_PATH` unset when using the physical camera. The ESP32 DevKit and Mac must be reachable on the same local network for the UDP audio transport.
+Replace `CAMERA_IP` with the ESP32-CAM's actual local IP address. Leave `EDITH_IMAGE_PATH` unset when using the physical camera. The ESP32 microphone and camera still communicate with the Mac over the network. The MAX98357A speaker output is not used when `EDITH_TTS_OUTPUT=local`.
 
 If Gemini is disabled or cannot connect, local command handlers remain available. Gemini-specific questions cannot use the cloud model until the connection is restored.
 
@@ -418,7 +418,7 @@ The `EDITH_TTS_OUTPUT` setting in `brain/audio.py` supports:
 
 | Value | Behaviour |
 |---|---|
-| `local` | Local macOS speech output |
+| `local` | Plays Gemini's native generated audio through the MacBook speakers; local text-to-speech is used when no Gemini audio is available |
 | `esp32` | Sends audio to the ESP32 speaker path |
 | `console`, `silent`, `none`, `off` | Suppresses speech playback |
 
