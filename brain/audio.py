@@ -21,7 +21,7 @@ from collections import deque
 from silero_vad import load_silero_vad
 
 # ==========================================
-# EDITH - WIRELESS SPEAKER OUTPUT
+# EDITH - AUDIO OUTPUT (MACBOOK DEFAULT; ESP32 OPTIONAL)
 # ==========================================
 
 TTS_ESP32_IP = "10.0.100.41"
@@ -138,7 +138,7 @@ def speak(text):
 
     try:
 
-        output_mode = os.getenv("EDITH_TTS_OUTPUT", "esp32").strip().lower()
+        output_mode = os.getenv("EDITH_TTS_OUTPUT", "local").strip().lower()
 
         if output_mode in ("console", "silent", "none", "off"):
             return
@@ -289,7 +289,7 @@ def play_gemini_audio(audio_data):
     if not audio_data:
         return False
 
-    output_mode = os.getenv("EDITH_TTS_OUTPUT", "esp32").strip().lower()
+    output_mode = os.getenv("EDITH_TTS_OUTPUT", "local").strip().lower()
     if output_mode in ("console", "silent", "none", "off"):
         return False
 
