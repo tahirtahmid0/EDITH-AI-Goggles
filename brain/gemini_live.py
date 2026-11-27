@@ -14,6 +14,7 @@ import queue
 import threading
 import time
 import traceback
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -208,6 +209,63 @@ def camera_reader(frames: LatestFrameStore, stop_event: threading.Event) -> None
                 print(f"[EDITH GEMINI] Camera stream interrupted (reconnect {failed_streams}): {exc}")
                 stop_event.wait(1.0)
     print("[EDITH GEMINI] Camera stream reader stopped.")
+
+
+class LocalCameraProxy(ThreadingHTTPServer):
+    """Serve EDITH's latest camera frames to local browser clients."""
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def start_camera_proxy(frames: LatestFrameStore, stop_event: threading.Event):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path not in ("/", "/stream"):
+                self.send_error(404)
+                return
+
+            self.send_response(200)
+            self.send_header(
+                "Content-Type",
+                "multipart/x-mixed-replace; boundary=edithframe",
+            )
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            last_sequence = -1
+            try:
+                while not stop_event.is_set():
+                    frame, sequence, _ = frames.get_latest()
+                    if frame is None or sequence == last_sequence:
+                        time.sleep(0.05)
+                        continue
+
+                    self.wfile.write(
+                        b"--edithframe\\r\\n"
+                        b"Content-Type: image/jpeg\\r\\n"
+                        + f"Content-Length: {len(frame)}\\r\\n\\r\\n".encode()
+                        + frame
+                        + b"\\r\\n"
+                    )
+                    self.wfile.flush()
+                    last_sequence = sequence
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+
+        def log_message(self, format, *args):
+            return
+
+    server = LocalCameraProxy(("127.0.0.1", 8765), Handler)
+    thread = threading.Thread(
+        target=server.serve_forever,
+        name="edith-local-camera-proxy",
+        daemon=True,
+    )
+    thread.start()
+    print("[EDITH CAMERA] Local browser preview: http://127.0.0.1:8765/stream")
+    return server
 
 
 class GeminiLiveAssistant:
@@ -450,6 +508,7 @@ class GeminiLiveAssistant:
             daemon=True,
         )
         reader.start()
+        camera_proxy = start_camera_proxy(frames, self._stop)
 
         try:
             self._client = genai.Client(
@@ -501,6 +560,8 @@ class GeminiLiveAssistant:
         finally:
             self._stop.set()
             self._ready.set()
+            camera_proxy.shutdown()
+            camera_proxy.server_close()
             reader.join(timeout=3.0)
             if self._client is not None:
                 await self._client.aio.aclose()
