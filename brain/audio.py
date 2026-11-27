@@ -1937,10 +1937,7 @@ def main(vad_model):
 
     print("[EDITH] Silero VAD ready!")
     print("[EDITH] Balanced noise filter enabled (100 Hz high-pass).")
-    print(
-        f"[EDITH] Wake phrase required before every command: "
-        f"'{WAKE_PHRASE.title()}'."
-    )
+    print("[EDITH] Wake phrase disabled; recognised speech is processed directly.")
     print("[EDITH] Listening continuously through the MacBook microphone.")
 
     # ======================================
@@ -1957,8 +1954,7 @@ def main(vad_model):
     current_utterance = []
 
     
-    # Capture the first five seconds of raw ESP32 PCM for a one-time
-    # microphone playback check. This is before filtering or VAD.
+    # Capture the first five seconds of raw Mac microphone PCM for diagnostics.
     debug_capture = bytearray()
     debug_capture_target_bytes = SAMPLE_RATE * SAMPLE_WIDTH * 5
     debug_capture_saved = False
@@ -2020,8 +2016,7 @@ def main(vad_model):
                         debug_capture_saved = True
                         print("[EDITH MIC DIAGNOSTIC] Could not save raw recording:", error)
 
-            # Measure the incoming PCM BEFORE filtering. This tells us
-            # whether clipping is already present in the ESP32 UDP payload.
+            # Measure Mac microphone PCM before filtering.
             raw_samples = struct.unpack(
                 "<" + "h" * CHUNK_SAMPLES,
                 audio_chunk
@@ -2088,7 +2083,7 @@ def main(vad_model):
                 )
                 print(
                     "[EDITH MIC DIAGNOSTIC] "
-                    f"UDP packets={total_packets} | "
+                    f"Mac mic blocks={total_packets // 2} | "
                     f"RMS={average_rms:.0f} | "
                     f"raw peak={diagnostic_raw_peak} | "
                     f"clipped={diagnostic_clipped_samples}/"
@@ -2197,7 +2192,8 @@ def main(vad_model):
 
     finally:
 
-        receiver.close()
+        input_stream.stop()
+        input_stream.close()
 
         # Submit any unfinished recording.
 
