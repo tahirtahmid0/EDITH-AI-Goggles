@@ -1065,6 +1065,13 @@ def normalize_transcription(text):
     # scene-description request is unambiguous.
     corrections = {
         "its what you can see": "describe what you can see",
+        # Short wake-name utterances are frequently misheard by STT:
+        # "Hi EDITH" may arrive as "Edit" or simply "Edith".
+        "edit": "hi edith",
+        "edith": "hi edith",
+        "hi edit": "hi edith",
+        "hey edit": "hey edith",
+        "hello edit": "hello edith",
     }
 
     return corrections.get(normalised, original)
