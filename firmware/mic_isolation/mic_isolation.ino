@@ -114,13 +114,22 @@ void microphoneTask(void* parameter) {
 
   while (true) {
 
-    // Preserve the original working microphone pipeline.
+    // Read complete 32-bit I2S samples. I2S.read() returns ONE BYTE,
+    // not a 32-bit sample; using it here silently produced all-zero PCM.
+    size_t bytesRead = I2S.readBytes(
+      (char*)rawSamples,
+      sizeof(rawSamples)
+    );
+
+    // Only transmit complete 256-sample / 512-byte PCM packets.
+    if (bytesRead != sizeof(rawSamples)) {
+      continue;
+    }
+
     for (int i = 0; i < MIC_BUFFER_SIZE; i++) {
-
-      rawSamples[i] = I2S.read();
-
-      audioSamples[i] =
-        (int16_t)(rawSamples[i] >> 16);
+      // INMP441 audio is left-aligned in the 32-bit I2S slot.
+      // Keep the upper 16 bits for EDITH's 16 kHz signed PCM stream.
+      audioSamples[i] = (int16_t)(rawSamples[i] >> 16);
     }
 
     // Continue reading even if Wi-Fi is disconnected.
