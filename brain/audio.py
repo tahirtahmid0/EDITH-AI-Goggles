@@ -1043,6 +1043,21 @@ def get_visual_event_response(command):
 
 
 
+def normalize_transcription(text):
+    """Correct a small set of high-confidence Whisper command mishearings."""
+    original = str(text or "").strip()
+    normalised = re.sub(r"[^a-z0-9]+", " ", original.lower()).strip()
+
+    # Whisper occasionally hears "Describe what you can see" as
+    # "It's what you can see". In EDITH's command context, the intended
+    # scene-description request is unambiguous.
+    corrections = {
+        "its what you can see": "describe what you can see",
+    }
+
+    return corrections.get(normalised, original)
+
+
 def process_command(text, audio_data=None):
     """
     Interpret recognised speech and execute the appropriate EDITH command.
@@ -1050,7 +1065,11 @@ def process_command(text, audio_data=None):
 
     global pending_explicit_memory
 
-    command = text.lower().strip()
+    corrected_text = normalize_transcription(text)
+    if corrected_text != str(text or "").strip():
+        print(f"[EDITH] Corrected transcription: {corrected_text}")
+
+    command = corrected_text.lower().strip()
 
     if not command:
         return
@@ -1660,7 +1679,10 @@ def transcription_worker():
                 task="transcribe",
                 initial_prompt=(
                     "EDITH is the name of an AI assistant. "
-                    "The speaker may say Hi EDITH or Hello EDITH."
+                    "The speaker may say Hi EDITH or Hello EDITH. "
+                    "Common spoken commands include: describe what you can see, "
+                    "what can you see, what is in front of me, and identify objects. "
+                    "Transcribe the words actually spoken; do not complete or invent commands."
                 )
             )
 
@@ -1669,7 +1691,8 @@ def transcription_worker():
                 f"{time.time() - transcription_start:.2f} seconds"
             )
 
-            text = result.get("text", "").strip()
+            raw_text = result.get("text", "").strip()
+            text = normalize_transcription(raw_text)
 
             for segment in result.get("segments", []):
                 print(
@@ -1691,8 +1714,10 @@ def transcription_worker():
             print("         EDITH HEARD")
             print("================================")
 
-            if text:
-                print(text)
+            if raw_text:
+                print(raw_text)
+                if text != raw_text:
+                    print(f"[EDITH] Corrected transcription: {text}")
             else:
                 print("[EDITH] No speech recognised.")
 
