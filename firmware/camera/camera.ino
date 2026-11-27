@@ -4,13 +4,14 @@
 #include "esp_http_server.h"
 
 // ==========================================
-// EDITH - CAMERA FIRMWARE V1.1
+// EDITH - CAMERA FIRMWARE V1.3
+// Features: Single JPEG capture + live MJPEG stream
 // Board: AI Thinker ESP32-CAM
 // ==========================================
 
 // Enter your Wi-Fi credentials locally.
-const char* WIFI_SSID = "Tuhin";
-const char* WIFI_PASSWORD = "$019730$";
+const char* WIFI_SSID = "YOUR_WIFI_SSID";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
 // ==========================================
 // AI THINKER ESP32-CAM PIN CONFIGURATION
@@ -40,6 +41,7 @@ const char* WIFI_PASSWORD = "$019730$";
 // ==========================================
 
 httpd_handle_t cameraServer = NULL;
+httpd_handle_t streamServer = NULL;
 
 bool wifiWasConnected = false;
 
@@ -163,8 +165,7 @@ bool startCamera() {
     s->set_framesize(s, FRAMESIZE_VGA);
     s->set_quality(s, 10);
 
-    // Keep the image vertically flipped for the existing mounting
-    // orientation, but disable horizontal mirroring so text reads normally.
+    // 180-degree image rotation.
 
     s->set_vflip(s, 1);
     s->set_hmirror(s, 0);
@@ -175,9 +176,9 @@ bool startCamera() {
 
     // Image adjustments.
 
-    s->set_brightness(s, 0);
-    s->set_contrast(s, 0);
-    s->set_saturation(s, 0);
+    s->set_brightness(s, 3);
+    s->set_contrast(s, 1);
+    s->set_saturation(s, 3);
     s->set_sharpness(s, 0);
 
     // Automatic image controls.
@@ -339,43 +340,174 @@ static esp_err_t captureHandler(httpd_req_t* request) {
 
 
 // ==========================================
-// START HTTP SERVER
+// EDITH - LIVE MJPEG STREAMING
+// GET /stream
+// ==========================================
+
+#define STREAM_BOUNDARY "edithframe"
+
+static esp_err_t streamHandler(httpd_req_t* request) {
+
+    Serial.println("[STREAM] Client connected.");
+
+    // Match the multipart framing used by Espressif CameraWebServer.
+    static const char* STREAM_BOUNDARY_PREFIX =
+        "\r\n--" STREAM_BOUNDARY "\r\n";
+
+    static const char* STREAM_PART_HEADER_FORMAT =
+        "Content-Type: image/jpeg\r\n"
+        "Content-Length: %u\r\n"
+        "\r\n";
+
+    esp_err_t result = httpd_resp_set_type(
+        request,
+        "multipart/x-mixed-replace;boundary=" STREAM_BOUNDARY
+    );
+
+    if (result != ESP_OK) {
+        Serial.printf("[STREAM] Could not set response type: 0x%x\n", result);
+        return result;
+    }
+
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store, no-cache, must-revalidate");
+    httpd_resp_set_hdr(request, "Pragma", "no-cache");
+    httpd_resp_set_hdr(request, "Access-Control-Allow-Origin", "*");
+
+    char partHeader[96];
+    unsigned long frameCount = 0;
+    unsigned long statsStart = millis();
+    unsigned long statsFrameCount = 0;
+
+    while (true) {
+
+        // Get the newest available camera frame.
+        camera_fb_t* frame = esp_camera_fb_get();
+
+        if (frame == NULL) {
+            Serial.println("[STREAM] Camera frame acquisition failed.");
+            result = ESP_FAIL;
+            break;
+        }
+
+        // This firmware configures the sensor to output JPEG directly.
+        if (frame->format != PIXFORMAT_JPEG) {
+            esp_camera_fb_return(frame);
+            Serial.println("[STREAM] Unexpected non-JPEG frame format.");
+            result = ESP_FAIL;
+            break;
+        }
+
+        int headerLength = snprintf(
+            partHeader,
+            sizeof(partHeader),
+            STREAM_PART_HEADER_FORMAT,
+            (unsigned int)frame->len
+        );
+
+        if (headerLength <= 0 || headerLength >= (int)sizeof(partHeader)) {
+            esp_camera_fb_return(frame);
+            Serial.println("[STREAM] Multipart header formatting failed.");
+            result = ESP_FAIL;
+            break;
+        }
+
+        // Send boundary, part header, and JPEG payload.
+        result = httpd_resp_send_chunk(
+            request,
+            STREAM_BOUNDARY_PREFIX,
+            strlen(STREAM_BOUNDARY_PREFIX)
+        );
+
+        if (result == ESP_OK) {
+            result = httpd_resp_send_chunk(
+                request,
+                partHeader,
+                headerLength
+            );
+        }
+
+        if (result == ESP_OK) {
+            result = httpd_resp_send_chunk(
+                request,
+                (const char*)frame->buf,
+                frame->len
+            );
+        }
+
+        // Always release the framebuffer, including on send failure.
+        esp_camera_fb_return(frame);
+        frame = NULL;
+
+        if (result != ESP_OK) {
+            // A browser closing the page normally reaches this branch.
+            Serial.printf("[STREAM] Client disconnected or send failed: 0x%x\n", result);
+            break;
+        }
+
+        frameCount++;
+        statsFrameCount++;
+
+        // Low-overhead performance report every 50 completed frames.
+        if (statsFrameCount >= 50) {
+            unsigned long now = millis();
+            unsigned long elapsed = now - statsStart;
+            float fps = elapsed > 0
+                ? (statsFrameCount * 1000.0f) / elapsed
+                : 0.0f;
+
+            Serial.printf(
+                "[STREAM] Frames: %lu | Recent FPS: %.2f | Wi-Fi RSSI: %d dBm\n",
+                frameCount,
+                fps,
+                WiFi.RSSI()
+            );
+
+            statsStart = now;
+            statsFrameCount = 0;
+        }
+
+        // Deliberately no fixed delay: transmission and camera timing
+        // determine the achievable frame rate, as in Espressif's example.
+    }
+
+    Serial.printf("[STREAM] Session ended. Frames sent: %lu\n", frameCount);
+    return result;
+}
+
+
+// ==========================================
+// START HTTP SERVERS
 // ==========================================
 
 bool startWebServer() {
 
-    httpd_config_t serverConfig =
-        HTTPD_DEFAULT_CONFIG();
+    // ======================================
+    // SERVER 1 - SINGLE IMAGE CAPTURE
+    // PORT 80, ENDPOINT /capture
+    // ======================================
 
-    serverConfig.server_port = 80;
+    httpd_config_t cameraConfig = HTTPD_DEFAULT_CONFIG();
+    cameraConfig.server_port = 80;
 
     httpd_uri_t captureURI = {};
-
     captureURI.uri = "/capture";
     captureURI.method = HTTP_GET;
     captureURI.handler = captureHandler;
     captureURI.user_ctx = NULL;
 
-    // Start server.
-
     esp_err_t result = httpd_start(
         &cameraServer,
-        &serverConfig
+        &cameraConfig
     );
 
     if (result != ESP_OK) {
-
         Serial.printf(
-            "[HTTP ERROR] Server startup failed: 0x%x\n",
+            "[HTTP ERROR] Capture server startup failed: 0x%x\n",
             result
         );
-
         cameraServer = NULL;
-
         return false;
     }
-
-    // Register capture endpoint.
 
     result = httpd_register_uri_handler(
         cameraServer,
@@ -383,22 +515,69 @@ bool startWebServer() {
     );
 
     if (result != ESP_OK) {
-
         Serial.printf(
-            "[HTTP ERROR] Endpoint registration failed: 0x%x\n",
+            "[HTTP ERROR] Capture endpoint registration failed: 0x%x\n",
             result
         );
-
         httpd_stop(cameraServer);
-
         cameraServer = NULL;
-
         return false;
     }
 
-    Serial.println("[HTTP] Camera server started!");
+    Serial.println("[HTTP] Capture server started on port 80.");
     Serial.println("[HTTP] Endpoint: /capture");
-    Serial.println("[HTTP] Port: 80");
+
+
+    // ======================================
+    // SERVER 2 - LIVE MJPEG STREAM
+    // PORT 81, ENDPOINT /stream
+    // ======================================
+
+    httpd_config_t streamConfig = HTTPD_DEFAULT_CONFIG();
+    streamConfig.server_port = 81;
+    streamConfig.ctrl_port = 32769;
+
+    httpd_uri_t streamURI = {};
+    streamURI.uri = "/stream";
+    streamURI.method = HTTP_GET;
+    streamURI.handler = streamHandler;
+    streamURI.user_ctx = NULL;
+
+    result = httpd_start(
+        &streamServer,
+        &streamConfig
+    );
+
+    if (result != ESP_OK) {
+        Serial.printf(
+            "[HTTP ERROR] Stream server startup failed: 0x%x\n",
+            result
+        );
+        streamServer = NULL;
+        httpd_stop(cameraServer);
+        cameraServer = NULL;
+        return false;
+    }
+
+    result = httpd_register_uri_handler(
+        streamServer,
+        &streamURI
+    );
+
+    if (result != ESP_OK) {
+        Serial.printf(
+            "[HTTP ERROR] Stream endpoint registration failed: 0x%x\n",
+            result
+        );
+        httpd_stop(streamServer);
+        streamServer = NULL;
+        httpd_stop(cameraServer);
+        cameraServer = NULL;
+        return false;
+    }
+
+    Serial.println("[HTTP] Live stream server started on port 81.");
+    Serial.println("[HTTP] Endpoint: /stream");
 
     return true;
 }
@@ -532,7 +711,7 @@ void setup() {
     Serial.println();
     Serial.println("================================");
     Serial.println("       EDITH VISION SYSTEM");
-    Serial.println("           VERSION 1.1");
+    Serial.println("           VERSION 1.3");
     Serial.println("================================");
 
     // ======================================
@@ -624,8 +803,16 @@ void setup() {
     Serial.println("================================");
 
     Serial.println("[SYSTEM] Camera: READY");
-    Serial.println("[SYSTEM] HTTP server: READY");
-    Serial.println("[SYSTEM] Capture: /capture");
+    Serial.println("[SYSTEM] Capture server: READY");
+    Serial.println("[SYSTEM] Live stream server: READY");
+
+    Serial.print("[SYSTEM] Capture URL: http://");
+    Serial.print(WiFi.localIP());
+    Serial.println("/capture");
+
+    Serial.print("[SYSTEM] Stream URL: http://");
+    Serial.print(WiFi.localIP());
+    Serial.println(":81/stream");
 
     Serial.println("================================");
 }
