@@ -1782,12 +1782,6 @@ def transcription_worker():
         finally:
             audio_queue.task_done()
 
-        except Exception as error:
-            print("[EDITH] Transcription error:", error)
-            traceback.print_exc()
-        finally:
-            audio_queue.task_done()
-
 
 # ==========================================
 # SILERO VAD PROCESSING
