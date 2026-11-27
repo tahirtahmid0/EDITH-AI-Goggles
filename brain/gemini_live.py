@@ -174,16 +174,22 @@ def camera_reader(
         "Cache-Control": "no-cache",
     })
 
+    successful_snapshots = 0
+    failed_snapshots = 0
+    last_snapshot_time = None
+
     try:
         while not stop_event.is_set():
             cycle_start = time.monotonic()
             try:
+                request_start = time.monotonic()
                 response = session.get(
                     capture_url,
                     timeout=(5, 12),
                 )
                 response.raise_for_status()
                 frame = response.content
+                request_seconds = time.monotonic() - request_start
 
                 if (
                     len(frame) < 4
@@ -193,9 +199,34 @@ def camera_reader(
                     raise ValueError("Camera returned an incomplete or invalid JPEG.")
 
                 _put_latest(frames, frame)
+                successful_snapshots += 1
+                snapshot_time = time.monotonic()
+                snapshot_gap = (
+                    snapshot_time - last_snapshot_time
+                    if last_snapshot_time is not None
+                    else 0.0
+                )
+                last_snapshot_time = snapshot_time
+
+                if successful_snapshots <= 5 or successful_snapshots % 30 == 0:
+                    size_kb = len(frame) / 1024
+                    speed_kb_s = size_kb / request_seconds if request_seconds > 0 else 0.0
+                    print(
+                        "[EDITH CAMERA METRICS] "
+                        f"snapshot={successful_snapshots} "
+                        f"size={size_kb:.1f} KB "
+                        f"request={request_seconds:.3f} s "
+                        f"transfer={speed_kb_s:.1f} KB/s "
+                        f"gap={snapshot_gap:.3f} s "
+                        f"failures={failed_snapshots}"
+                    )
             except Exception as exc:
+                failed_snapshots += 1
                 if not stop_event.is_set():
-                    print(f"[EDITH GEMINI] Camera snapshot failed: {exc}")
+                    print(
+                        f"[EDITH GEMINI] Camera snapshot failed "
+                        f"(total failures: {failed_snapshots}): {exc}"
+                    )
                     stop_event.wait(1.5)
                 continue
 
