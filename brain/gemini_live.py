@@ -329,6 +329,25 @@ class GeminiLiveAssistant:
                 self._active_request = None
                 raise
 
+    @staticmethod
+    def _finish_request(request) -> None:
+        """Publish a completed turn exactly once."""
+        if request["done"].is_set():
+            return
+        request["result"] = {
+            "input_text": "".join(request["input_text_parts"]).strip(),
+            "text": "".join(request["text_parts"]).strip(),
+            "audio": b"".join(request["audio_parts"]),
+        }
+        request["done"].set()
+
+    async def _finish_after_transcription_grace(self, request) -> None:
+        """Allow late input-transcription events to arrive after turn_complete."""
+        await asyncio.sleep(1.5)
+        if self._active_request is request:
+            self._finish_request(request)
+            self._active_request = None
+
     async def _receive_responses(self, session) -> None:
         while not self._stop.is_set():
             async for response in session.receive():
@@ -341,6 +360,15 @@ class GeminiLiveAssistant:
                     input_transcript = getattr(content, "input_transcription", None)
                     if input_transcript and input_transcript.text:
                         request["input_text_parts"].append(input_transcript.text)
+                    if input_transcript and getattr(input_transcript, "finished", False):
+                        request["input_transcription_finished"] = True
+
+                    # Gemini documents input transcription and model-turn
+                    # completion as independent events: either may arrive first.
+                    # Collect the final transcript before releasing this request.
+                    interim = getattr(content, "interim_input_transcription", None)
+                    if interim and interim.text and not request["input_text_parts"]:
+                        request["interim_input_text"] = interim.text
 
                     transcript = getattr(content, "output_transcription", None)
                     if transcript and transcript.text:
@@ -354,12 +382,21 @@ class GeminiLiveAssistant:
                                 request["audio_parts"].append(inline_data.data)
 
                     if getattr(content, "turn_complete", False):
-                        request["result"] = {
-                            "input_text": "".join(request["input_text_parts"]).strip(),
-                            "text": "".join(request["text_parts"]).strip(),
-                            "audio": b"".join(request["audio_parts"]),
-                        }
-                        request["done"].set()
+                        request["turn_complete"] = True
+                        if request.get("input_transcription_finished"):
+                            self._finish_request(request)
+                            self._active_request = None
+                        elif not request.get("transcription_grace_started"):
+                            request["transcription_grace_started"] = True
+                            asyncio.create_task(
+                                self._finish_after_transcription_grace(request)
+                            )
+
+                    elif (
+                        request.get("turn_complete")
+                        and request.get("input_transcription_finished")
+                    ):
+                        self._finish_request(request)
                         self._active_request = None
 
                 if self._stop.is_set():
