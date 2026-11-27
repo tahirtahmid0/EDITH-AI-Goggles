@@ -62,26 +62,41 @@ IMPORTANT RESPONSE RULES:
   user-facing system has actually provided that information."""
 
 
-def get_camera_capture_url() -> str:
-    """Return the ESP32-CAM snapshot endpoint implemented by the firmware."""
-    capture_url = os.getenv("CAMERA_URL", "").strip()
-    if not capture_url:
-        raise RuntimeError(
-            "Set CAMERA_URL in .env, or set EDITH_IMAGE_PATH "
-            "to use a local test image."
-        )
-
-    parsed = urlsplit(capture_url)
-    if not parsed.scheme or not parsed.hostname:
+def get_camera_stream_url() -> str:
+    """Return the ESP32-CAM's continuous MJPEG stream endpoint."""
+    camera_url = os.getenv("CAMERA_URL", "").strip()
+    if not camera_url:
+        raise RuntimeError("Set CAMERA_URL in .env, or set EDITH_IMAGE_PATH to use a local test image.")
+    parsed = urlsplit(camera_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise RuntimeError("CAMERA_URL is not a valid HTTP URL.")
+    port = parsed.port
+    if port is None or port == 80:
+        port = 81
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return urlunsplit((parsed.scheme, f"{host}:{port}", "/stream", "", ""))
 
-    path = parsed.path.rstrip("/")
-    if not path:
-        path = "/capture"
-    elif not path.endswith("/capture"):
-        path = f"{path}/capture"
 
-    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+class LatestFrameStore:
+    """Thread-safe single-slot store; old frames are overwritten, never queued."""
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._frame = None
+        self._sequence = 0
+        self._captured_at = 0.0
+
+    def publish(self, frame: bytes) -> int:
+        with self._lock:
+            self._frame = frame
+            self._sequence += 1
+            self._captured_at = time.monotonic()
+            return self._sequence
+
+    def get_latest(self):
+        with self._lock:
+            return self._frame, self._sequence, self._captured_at
 
 
 def iter_mjpeg_frames(url: str, stop_event: threading.Event):
@@ -136,13 +151,9 @@ def _put_latest(frames: queue.Queue, frame: bytes) -> None:
             pass
 
 
-def camera_reader(
-    frames: queue.Queue,
-    stop_event: threading.Event,
-) -> None:
-    """Poll the firmware snapshot endpoint, or refresh a local test image."""
+def camera_reader(frames: LatestFrameStore, stop_event: threading.Event) -> None:
+    """Continuously read MJPEG and retain only the newest complete frame."""
     image_path = os.getenv("EDITH_IMAGE_PATH", "").strip()
-
     if image_path:
         path = Path(image_path).expanduser()
         print(f"[EDITH GEMINI] Using local image source: {path}")
@@ -152,7 +163,7 @@ def camera_reader(
                     image = source.convert("RGB")
                     buffer = io.BytesIO()
                     image.save(buffer, format="JPEG", quality=90)
-                    _put_latest(frames, buffer.getvalue())
+                    frames.publish(buffer.getvalue())
             except Exception as exc:
                 print(f"[EDITH GEMINI] Local image error: {exc}")
                 stop_event.wait(2.0)
@@ -161,82 +172,42 @@ def camera_reader(
         return
 
     try:
-        capture_url = get_camera_capture_url()
+        stream_url = get_camera_stream_url()
     except Exception as exc:
         print(f"[EDITH GEMINI] Camera source unavailable: {exc}")
         stop_event.set()
         return
 
-    print(f"[EDITH GEMINI] Polling camera snapshots: {capture_url}")
-    session = requests.Session()
-    session.headers.update({
-        "Connection": "close",
-        "Cache-Control": "no-cache",
-    })
-
-    successful_snapshots = 0
-    failed_snapshots = 0
-    last_snapshot_time = None
-
-    try:
-        while not stop_event.is_set():
-            cycle_start = time.monotonic()
-            try:
-                request_start = time.monotonic()
-                response = session.get(
-                    capture_url,
-                    timeout=(5, 12),
-                )
-                response.raise_for_status()
-                frame = response.content
-                request_seconds = time.monotonic() - request_start
-
-                if (
-                    len(frame) < 4
-                    or not frame.startswith(b"\xff\xd8")
-                    or not frame.endswith(b"\xff\xd9")
-                ):
-                    raise ValueError("Camera returned an incomplete or invalid JPEG.")
-
-                _put_latest(frames, frame)
-                successful_snapshots += 1
-                snapshot_time = time.monotonic()
-                snapshot_gap = (
-                    snapshot_time - last_snapshot_time
-                    if last_snapshot_time is not None
-                    else 0.0
-                )
-                last_snapshot_time = snapshot_time
-
-                if successful_snapshots <= 5 or successful_snapshots % 30 == 0:
-                    size_kb = len(frame) / 1024
-                    speed_kb_s = size_kb / request_seconds if request_seconds > 0 else 0.0
+    print(f"[EDITH GEMINI] Connecting to continuous camera stream: {stream_url}")
+    successful_frames = 0
+    failed_streams = 0
+    last_frame_time = None
+    while not stop_event.is_set():
+        try:
+            for frame in iter_mjpeg_frames(stream_url, stop_event):
+                if stop_event.is_set():
+                    break
+                sequence = frames.publish(frame)
+                successful_frames += 1
+                now = time.monotonic()
+                frame_gap = now - last_frame_time if last_frame_time is not None else 0.0
+                last_frame_time = now
+                if successful_frames <= 3 or successful_frames % 150 == 0:
                     print(
-                        "[EDITH CAMERA METRICS] "
-                        f"snapshot={successful_snapshots} "
-                        f"size={size_kb:.1f} KB "
-                        f"request={request_seconds:.3f} s "
-                        f"transfer={speed_kb_s:.1f} KB/s "
-                        f"gap={snapshot_gap:.3f} s "
-                        f"failures={failed_snapshots}"
+                        "[EDITH CAMERA STREAM] "
+                        f"frames={successful_frames} latest={sequence} "
+                        f"size={len(frame) / 1024:.1f} KB "
+                        f"gap={frame_gap:.3f} s reconnects={failed_streams}"
                     )
-            except Exception as exc:
-                failed_snapshots += 1
-                if not stop_event.is_set():
-                    print(
-                        f"[EDITH GEMINI] Camera snapshot failed "
-                        f"(total failures: {failed_snapshots}): {exc}"
-                    )
-                    stop_event.wait(1.5)
-                continue
-
-            remaining = FRAME_INTERVAL_SECONDS - (time.monotonic() - cycle_start)
-            if remaining > 0:
-                stop_event.wait(remaining)
-    finally:
-        session.close()
-
-    print("[EDITH GEMINI] Camera reader stopped.")
+            if stop_event.is_set():
+                break
+            raise RuntimeError("Camera MJPEG stream ended unexpectedly.")
+        except Exception as exc:
+            failed_streams += 1
+            if not stop_event.is_set():
+                print(f"[EDITH GEMINI] Camera stream interrupted (reconnect {failed_streams}): {exc}")
+                stop_event.wait(1.0)
+    print("[EDITH GEMINI] Camera stream reader stopped.")
 
 
 class GeminiLiveAssistant:
@@ -289,52 +260,48 @@ class GeminiLiveAssistant:
                 traceback.print_exc()
 
     async def _send_frames(
-        self,
-        session,
-        frames: queue.Queue,
-        camera_ready: threading.Event,
+        self, session, frames: LatestFrameStore,
+        camera_ready: threading.Event, send_lock: asyncio.Lock,
     ) -> None:
-        sent = 0
+        sent_sequence = 0
         loop = asyncio.get_running_loop()
         next_send = loop.time()
         while not self._stop.is_set():
-            try:
-                frame = await asyncio.to_thread(frames.get, True, 2.0)
-            except queue.Empty:
-                continue
-
             delay = next_send - loop.time()
             if delay > 0:
                 await asyncio.sleep(delay)
-
-            # Use ordered client content for every visual frame. Gemini's
-            # realtime_input path does not guarantee ordering relative to text,
-            # which can let a question overtake the image during preprocessing.
-            await session.send_client_content(
-                turns=types.Content(
-                    role="user",
-                    parts=[
-                        types.Part(
-                            inline_data=types.Blob(
-                                data=frame,
-                                mime_type="image/jpeg",
-                            )
-                        )
-                    ],
-                ),
-                turn_complete=False,
-            )
-            sent += 1
+            frame, sequence, captured_at = frames.get_latest()
+            if frame is None or sequence == sent_sequence:
+                await asyncio.sleep(0.05)
+                continue
+            async with send_lock:
+                # Re-read after acquiring the lock to avoid sending a frame
+                # that became stale while waiting behind a question.
+                frame, sequence, captured_at = frames.get_latest()
+                if frame is None or sequence == sent_sequence:
+                    continue
+                await session.send_client_content(
+                    turns=types.Content(
+                        role="user",
+                        parts=[types.Part(inline_data=types.Blob(
+                            data=frame, mime_type="image/jpeg"
+                        ))],
+                    ),
+                    turn_complete=False,
+                )
+            sent_sequence = sequence
             next_send = loop.time() + FRAME_INTERVAL_SECONDS
-            if sent <= 3 or sent % 30 == 0:
-                print(f"[EDITH GEMINI] Camera frames sent: {sent}")
-            if sent >= 3 and not camera_ready.is_set():
+            if sent_sequence <= 3 or sent_sequence % 30 == 0:
+                age = max(0.0, time.monotonic() - captured_at)
+                print(f"[EDITH GEMINI] Camera frames sent: {sent_sequence} (frame age {age:.2f}s)")
+            if sent_sequence >= 3 and not camera_ready.is_set():
                 camera_ready.set()
                 print("[EDITH GEMINI] Live camera feed confirmed.")
-
             await asyncio.sleep(0)
 
-    async def _send_questions(self, session) -> None:
+    async def _send_questions(
+        self, session, frames: LatestFrameStore, send_lock: asyncio.Lock
+    ) -> None:
         while not self._stop.is_set():
             # Do not associate a late response with a newer request if the
             # caller timed out while Gemini was still generating its answer.
@@ -353,31 +320,32 @@ class GeminiLiveAssistant:
 
             self._active_request = request
             try:
+                # Bind each question to the newest camera frame in the same
+                # ordered user turn so the answer reflects the current scene.
+                frame, frame_sequence, captured_at = frames.get_latest()
+                parts = []
+                if frame is not None:
+                    parts.append(types.Part(inline_data=types.Blob(
+                        data=frame, mime_type="image/jpeg"
+                    )))
                 audio_data = request.get("audio_data")
                 if audio_data:
-                    # Keep all session inputs on the ordered client_content
-                    # path; do not mix it with realtime_input in one session.
+                    parts.append(types.Part(inline_data=types.Blob(
+                        data=audio_data, mime_type="audio/pcm;rate=16000"
+                    )))
+                else:
+                    parts.append(types.Part(text=request["question"]))
+
+                async with send_lock:
                     await session.send_client_content(
-                        turns=types.Content(
-                            role="user",
-                            parts=[
-                                types.Part(
-                                    inline_data=types.Blob(
-                                        data=audio_data,
-                                        mime_type="audio/pcm;rate=16000",
-                                    )
-                                )
-                            ],
-                        ),
+                        turns=types.Content(role="user", parts=parts),
                         turn_complete=True,
                     )
-                else:
-                    await session.send_client_content(
-                        turns=types.Content(
-                            role="user",
-                            parts=[types.Part(text=request["question"])],
-                        ),
-                        turn_complete=True,
+                if frame is not None:
+                    age = max(0.0, time.monotonic() - captured_at)
+                    print(
+                        "[EDITH GEMINI] Question paired with latest camera "
+                        f"frame #{frame_sequence} (age {age:.2f}s)."
                     )
             except Exception as exc:
                 request["error"] = exc
@@ -472,8 +440,9 @@ class GeminiLiveAssistant:
                 await asyncio.sleep(0.05)
 
     async def _run_session(self) -> None:
-        frames: queue.Queue = queue.Queue(maxsize=1)
+        frames = LatestFrameStore()
         camera_ready = threading.Event()
+        send_lock = asyncio.Lock()
         reader = threading.Thread(
             target=camera_reader,
             args=(frames, self._stop),
@@ -503,8 +472,8 @@ class GeminiLiveAssistant:
             ) as session:
                 print("[EDITH GEMINI] Persistent Live session connected.")
                 tasks = [
-                    asyncio.create_task(self._send_frames(session, frames, camera_ready)),
-                    asyncio.create_task(self._send_questions(session)),
+                    asyncio.create_task(self._send_frames(session, frames, camera_ready, send_lock)),
+                    asyncio.create_task(self._send_questions(session, frames, send_lock)),
                     asyncio.create_task(self._receive_responses(session)),
                 ]
 
