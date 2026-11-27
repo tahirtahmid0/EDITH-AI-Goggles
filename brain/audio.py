@@ -1973,6 +1973,8 @@ def main(vad_model):
     diagnostic_clipped_samples = 0
     diagnostic_raw_sample_count = 0
 
+    mic_paused = False
+
     try:
 
         while True:
@@ -1984,6 +1986,38 @@ def main(vad_model):
                     "Stopping the listening system."
                 )
                 break
+
+            # Actually stop the PortAudio input stream while EDITH is busy.
+            # Merely discarding chunks still leaves the microphone capturing.
+            if speaking.is_set() or command_processing.is_set():
+                voice_active = False
+                speech_count = 0
+                silence_count = 0
+                pre_roll.clear()
+                current_utterance = []
+
+                if not mic_paused:
+                    try:
+                        input_stream.stop()
+                        mic_paused = True
+                        print("[EDITH MIC] Microphone capture paused during processing.")
+                    except Exception as error:
+                        print("[EDITH MIC ERROR] Could not pause microphone:", error)
+
+                time.sleep(0.05)
+                continue
+
+            # Restart capture only after the complete command and response finish.
+            if mic_paused:
+                try:
+                    input_stream.start()
+                    mic_paused = False
+                    print("[EDITH MIC] Microphone capture resumed.")
+                    pre_roll.clear()
+                except Exception as error:
+                    print("[EDITH MIC ERROR] Could not resume microphone:", error)
+                    time.sleep(0.25)
+                    continue
 
             try:
                 audio_chunk, overflowed = input_stream.read(CHUNK_SAMPLES)
@@ -2037,21 +2071,6 @@ def main(vad_model):
             # Apply the same gentle filter to VAD input and the recorded
             # utterance so speech detection and transcription hear matching audio.
             audio_chunk = balanced_filter_audio(audio_chunk)
-
-            # ==================================
-            # IGNORE AUDIO WHILE EDITH SPEAKS OR PROCESSES A COMMAND
-            # ==================================
-
-            if speaking.is_set() or command_processing.is_set():
-                voice_active = False
-
-                speech_count = 0
-                silence_count = 0
-
-                pre_roll.clear()
-                current_utterance = []
-
-                continue
 
             # ==================================
             # NEURAL SPEECH DETECTION
