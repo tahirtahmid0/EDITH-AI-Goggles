@@ -547,6 +547,37 @@ def close_gemini_live():
         assistant.close()
 
 
+_GEMINI_RESTART_LOCK = threading.Lock()
+
+
+def _restart_gemini_live():
+    """Reconnect Gemini in the background after a timed-out Live turn."""
+    global _GEMINI_START_ATTEMPTED
+
+    if not _GEMINI_RESTART_LOCK.acquire(blocking=False):
+        return
+
+    try:
+        print("[EDITH GEMINI] Restarting the Live session after a timeout...")
+        close_gemini_live()
+        _GEMINI_START_ATTEMPTED = False
+        start_gemini_live()
+    except Exception as error:
+        print("[EDITH GEMINI] Automatic reconnect failed:", error)
+        traceback.print_exc()
+    finally:
+        _GEMINI_RESTART_LOCK.release()
+
+
+def _schedule_gemini_restart():
+    """Keep recovery off the speech-processing thread."""
+    threading.Thread(
+        target=_restart_gemini_live,
+        name="EDITH-Gemini-Reconnect",
+        daemon=True,
+    ).start()
+
+
 def answer_with_gemini(command, audio_data=None):
     """Send a request to Gemini and preserve native audio even without a transcript."""
     if _GEMINI_ASSISTANT is None:
@@ -557,6 +588,10 @@ def answer_with_gemini(command, audio_data=None):
         result = _GEMINI_ASSISTANT.ask(command, audio_data=audio_data)
 
         if not result:
+            # A timed-out request stops the old session so a missing
+            # turn_complete event cannot block every later question.
+            if _GEMINI_ASSISTANT is not None and _GEMINI_ASSISTANT._stop.is_set():
+                _schedule_gemini_restart()
             print("[EDITH GEMINI] No response returned; falling back to local AI.")
             return False
 
@@ -1441,25 +1476,24 @@ def process_command(text, audio_data=None):
 
         print("[EDITH] Looking around...")
 
-        image = capture_image()
+        try:
+            image = capture_image()
+            if not image:
+                raise RuntimeError("The camera returned an empty image.")
 
-        if image:
             detection_result = run_object_detection(image)
-
             display_results(detection_result)
 
             # ==================================
             # EDITH SPEAKS DETECTED OBJECTS
             # ==================================
 
-            detections = detection_result["detections"]
+            detections = detection_result.get("detections", [])
 
             if detections:
-
                 detected_objects = []
 
                 for detection in detections:
-
                     name = detection["class_name"].replace("_", " ")
                     position = get_object_position(detection)
                     description = f"{name} {position}"
@@ -1468,16 +1502,18 @@ def process_command(text, audio_data=None):
                         detected_objects.append(description)
 
                 objects_text = ", ".join(detected_objects)
-
                 respond(f"I can see {objects_text}.")
-
             else:
                 print("[EDITH] No objects detected.")
                 respond("I couldn't identify any objects.")
 
-        else:
-            print("[EDITH] I couldn't capture an image.")
-            respond("I couldn't capture an image.")
+        except Exception as error:
+            print("[EDITH ERROR] Object detection failed:", error)
+            traceback.print_exc()
+            respond(
+                "I couldn't complete object detection just now. "
+                "Please check that the camera is connected and try again."
+            )
 
     # ==========================================
     # COMMAND 3: SCENE DESCRIPTION
