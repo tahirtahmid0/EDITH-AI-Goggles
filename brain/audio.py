@@ -613,6 +613,10 @@ def answer_with_gemini(command, audio_data=None):
         return False
 
     except Exception as error:
+        # A failed send/receive can terminate the Live session just like a
+        # timeout. Reconnect in the background if the session has stopped.
+        if _GEMINI_ASSISTANT is not None and _GEMINI_ASSISTANT._stop.is_set():
+            _schedule_gemini_restart()
         print("[EDITH GEMINI] Request failed; falling back to local AI:", error)
         traceback.print_exc()
         return False
