@@ -1648,7 +1648,13 @@ def save_wav(audio_data):
 
 
 def transcribe_with_gemini(audio_data):
-    """Transcribe one completed utterance with Gemini's dedicated STT model."""
+    """Transcribe one completed utterance with Gemini Flash-Lite.
+
+    Gemini 3.5 Transcribe is currently exposed through a different API path
+    from the v1 generateContent endpoint used by this API-key client. Use
+    Flash-Lite's native audio understanding here to avoid a guaranteed 404;
+    Whisper remains the final local fallback in transcription_worker().
+    """
     try:
         from google import genai
         from google.genai import types
@@ -1659,7 +1665,6 @@ def transcribe_with_gemini(audio_data):
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is missing.")
 
-    # Keep one API client for the lifetime of the process.
     global _GEMINI_TRANSCRIPTION_CLIENT
     if _GEMINI_TRANSCRIPTION_CLIENT is None:
         _GEMINI_TRANSCRIPTION_CLIENT = genai.Client(api_key=api_key)
@@ -1673,32 +1678,20 @@ def transcribe_with_gemini(audio_data):
         text=(
             "Transcribe the spoken audio verbatim. Return only the words "
             "spoken by the user. Do not answer the speaker, interpret the "
-            "request, or add commentary. Preserve command wording."
+            "request, or add commentary. Preserve command wording. "
+            "The speaker may be giving short commands to an AI assistant "
+            "named EDITH. Pay close attention to the exact first word."
         )
     )
-
-    # Dedicated STT model first. A text-capable Gemini model is retained as
-    # a second Gemini fallback because the dedicated endpoint can occasionally
-    # return an empty response for otherwise valid audio.
-    try:
-        response = _GEMINI_TRANSCRIPTION_CLIENT.models.generate_content(
-            model="gemini-3.5-transcribe",
-            contents=[audio_part, prompt_part],
-        )
-        transcript = str(getattr(response, "text", "") or "").strip()
-        if transcript:
-            return transcript
-        print("[EDITH] Gemini 3.5 Transcribe returned no text; trying Gemini Flash-Lite.")
-    except Exception as error:
-        print("[EDITH] Gemini 3.5 Transcribe request failed; trying Gemini Flash-Lite:", error)
 
     response = _GEMINI_TRANSCRIPTION_CLIENT.models.generate_content(
         model="gemini-3.5-flash-lite",
         contents=[audio_part, prompt_part],
+        config=types.GenerateContentConfig(temperature=0),
     )
     transcript = str(getattr(response, "text", "") or "").strip()
     if not transcript:
-        raise RuntimeError("Both Gemini transcription models returned an empty transcript.")
+        raise RuntimeError("Gemini Flash-Lite returned an empty transcript.")
     return transcript
 
 
