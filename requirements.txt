@@ -23,6 +23,7 @@ kestrel-mps-torch-ext==0.1.2
 kestrel-native==0.1.8
 
 # Audio processing
+sounddevice
 silero-vad==6.2.3
 mlx-whisper
 
