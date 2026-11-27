@@ -37,7 +37,7 @@ FFMPEG_PATH = "/opt/homebrew/bin/ffmpeg"
 
 # ==========================================
 # EDITH - SILERO AUTOMATIC LISTENING
-# ESP32 -> UDP -> SILERO VAD -> WHISPER
+# MacBook microphone -> SILERO VAD -> transcription
 # ==========================================
 
 
@@ -1902,21 +1902,31 @@ def main(vad_model):
 
     start_gemini_live()
 
-    receiver = socket.socket(
-        socket.AF_INET,
-        socket.SOCK_DGRAM
-    )
+    # Use the MacBook's built-in microphone directly. This bypasses the
+    # ESP32/INMP441 UDP path while keeping the existing VAD/transcription flow.
+    try:
+        import sounddevice as sd
+    except ImportError as error:
+        raise RuntimeError(
+            "Mac microphone input requires sounddevice. Install it with: "
+            "python -m pip install sounddevice"
+        ) from error
 
-    receiver.setsockopt(
-        socket.SOL_SOCKET,
-        socket.SO_RCVBUF,
-        1024 * 1024
-    )
+    try:
+        input_stream = sd.RawInputStream(
+            samplerate=SAMPLE_RATE,
+            blocksize=CHUNK_SAMPLES,
+            channels=1,
+            dtype="int16",
+        )
+        input_stream.start()
+    except Exception as error:
+        raise RuntimeError(
+            "Could not open the MacBook microphone. Check macOS microphone "
+            "permission for Terminal/your IDE and the selected input device."
+        ) from error
 
-    receiver.bind((HOST, PORT))
-    receiver.settimeout(1.0)
-
-    print("[EDITH] Waiting for ESP32 microphone...")
+    print("[EDITH] MacBook microphone ready (16 kHz, mono, 16-bit PCM).")
 
     worker = threading.Thread(
         target=transcription_worker,
@@ -1931,7 +1941,7 @@ def main(vad_model):
         f"[EDITH] Wake phrase required before every command: "
         f"'{WAKE_PHRASE.title()}'."
     )
-    print("[EDITH] Listening continuously; unrelated speech will be ignored.")
+    print("[EDITH] Listening continuously through the MacBook microphone.")
 
     # ======================================
     # LISTENING STATE
@@ -1946,8 +1956,7 @@ def main(vad_model):
 
     current_utterance = []
 
-    packet_buffer = bytearray()
-
+    
     # Capture the first five seconds of raw ESP32 PCM for a one-time
     # microphone playback check. This is before filtering or VAD.
     debug_capture = bytearray()
@@ -1977,37 +1986,18 @@ def main(vad_model):
                 break
 
             try:
-                data, address = receiver.recvfrom(4096)
-
-
-            except socket.timeout:
-                now = time.monotonic()
-                if now - last_diagnostic_time >= 2.0:
-                    if now - last_packet_time >= 2.0:
-                        print(
-                            "[EDITH MIC DIAGNOSTIC] No UDP packets received "
-                            f"for {now - last_packet_time:.1f}s on port {PORT}. "
-                            "Check ESP32 sender IP/port and network."
-                        )
-                    last_diagnostic_time = now
+                audio_chunk, overflowed = input_stream.read(CHUNK_SAMPLES)
+                if overflowed:
+                    print("[EDITH MIC] Input overflow; one audio block may have been dropped.")
+            except Exception as error:
+                print("[EDITH MIC ERROR] Could not read Mac microphone:", error)
+                time.sleep(0.1)
                 continue
 
-            last_packet_time = time.monotonic()
-
-            # Ignore unexpected packet sizes.
-            if len(data) != PACKET_BYTES:
+            if len(audio_chunk) != CHUNK_BYTES:
                 continue
 
-            total_packets += 1
-
-            # Combine two 256-sample packets.
-            packet_buffer.extend(data)
-
-            if len(packet_buffer) < CHUNK_BYTES:
-                continue
-
-            audio_chunk = bytes(packet_buffer[:CHUNK_BYTES])
-            del packet_buffer[:CHUNK_BYTES]
+            total_packets += 2
 
             if not debug_capture_saved:
                 remaining = debug_capture_target_bytes - len(debug_capture)
