@@ -56,12 +56,23 @@ PACKET_BYTES = PACKET_SAMPLES * SAMPLE_WIDTH
 CHUNK_SAMPLES = 512
 CHUNK_BYTES = CHUNK_SAMPLES * SAMPLE_WIDTH
 
-# Silero detection settings.
-START_THRESHOLD = 0.45
-STOP_THRESHOLD = 0.30
+# Balanced microphone tuning for a noisy science-fair environment.
+# A gentle 100 Hz high-pass filter reduces handling/room rumble without
+# trying to remove speech frequencies.
+NOISE_FILTER_CUTOFF_HZ = 100.0
+_HPF_ALPHA = 1.0 - (2.0 * 3.141592653589793 * NOISE_FILTER_CUTOFF_HZ / SAMPLE_RATE)
+_HPF_PREVIOUS_INPUT = 0.0
+_HPF_PREVIOUS_OUTPUT = 0.0
 
-START_CHUNKS = 2
+# Require clearer, sustained speech before recording an utterance.
+START_THRESHOLD = 0.65
+STOP_THRESHOLD = 0.40
+
+START_CHUNKS = 3
 STOP_CHUNKS = 25
+
+# Every microphone command must begin with this exact wake phrase.
+WAKE_PHRASE = "hey edith"
 
 # Keep approximately 256 ms before speech detection.
 PRE_ROLL_CHUNKS = 8
@@ -1065,16 +1076,27 @@ def normalize_transcription(text):
     # scene-description request is unambiguous.
     corrections = {
         "its what you can see": "describe what you can see",
-        # Short wake-name utterances are frequently misheard by STT:
-        # "Hi EDITH" may arrive as "Edit" or simply "Edith".
-        "edit": "hi edith",
-        "edith": "hi edith",
-        "hi edit": "hi edith",
+        # Keep the required "Hey EDITH" wake phrase robust to the common
+        # single-word ASR error "edit", but do not turn "edith" alone into
+        # a valid wake phrase.
         "hey edit": "hey edith",
-        "hello edit": "hello edith",
     }
 
     return corrections.get(normalised, original)
+
+
+def extract_wake_command(transcript):
+    """Return the command only when the utterance starts with 'Hey EDITH'."""
+    match = re.match(
+        r"^\\s*hey\\s+edith\\b[\\s,.:;!?-]*(.*)$",
+        str(transcript or "").strip(),
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    command = match.group(1).strip()
+    return command if command else ""
 
 
 def process_command(text, audio_data=None, gemini_result=None):
@@ -1787,15 +1809,27 @@ def transcription_worker():
             print("================================\n")
 
             if text:
-                try:
-                    vision.memory.save_conversation(role="user", content=text)
-                except Exception as error:
-                    print("[EDITH MEMORY] Could not save user message:", error)
+                command = extract_wake_command(text)
+                if command is None:
+                    print(
+                        f"[EDITH WAKE] Ignored speech without the required "
+                        f"'{WAKE_PHRASE}' prefix."
+                    )
+                elif not command:
+                    print("[EDITH WAKE] Wake phrase heard; no command followed.")
+                else:
+                    print(f"[EDITH WAKE] Accepted command: {command}")
+                    try:
+                        vision.memory.save_conversation(
+                            role="user",
+                            content=command,
+                        )
+                    except Exception as error:
+                        print("[EDITH MEMORY] Could not save user message:", error)
 
-                # The command router decides whether this needs Live, YOLO,
-                # Moondream, or a local memory operation. Live receives text.
-                process_command(text)
-                last_activity_time = time.monotonic()
+                    # Only wake-prefixed commands reach EDITH's command router.
+                    process_command(command)
+                    last_activity_time = time.monotonic()
 
         except Exception as error:
             print("[EDITH] Transcription error:", error)
@@ -1807,6 +1841,35 @@ def transcription_worker():
 # ==========================================
 # SILERO VAD PROCESSING
 # ==========================================
+
+def balanced_filter_audio(audio_chunk):
+    """Apply a gentle stateful high-pass filter to reduce low-frequency rumble."""
+    global _HPF_PREVIOUS_INPUT, _HPF_PREVIOUS_OUTPUT
+
+    if len(audio_chunk) != CHUNK_BYTES:
+        return audio_chunk
+
+    samples = struct.unpack("<" + "h" * CHUNK_SAMPLES, audio_chunk)
+    filtered = []
+
+    previous_input = _HPF_PREVIOUS_INPUT
+    previous_output = _HPF_PREVIOUS_OUTPUT
+
+    for sample in samples:
+        current_input = float(sample)
+        current_output = _HPF_ALPHA * (
+            previous_output + current_input - previous_input
+        )
+        current_output = max(-32768.0, min(32767.0, current_output))
+        filtered.append(int(round(current_output)))
+        previous_input = current_input
+        previous_output = current_output
+
+    _HPF_PREVIOUS_INPUT = previous_input
+    _HPF_PREVIOUS_OUTPUT = previous_output
+
+    return struct.pack("<" + "h" * CHUNK_SAMPLES, *filtered)
+
 
 def detect_speech(vad_model, audio_chunk):
 
@@ -1867,8 +1930,12 @@ def main(vad_model):
     worker.start()
 
     print("[EDITH] Silero VAD ready!")
-    print("[EDITH] Listening continuously.")
-    print("[EDITH] Speak normally. No wake word required.")
+    print("[EDITH] Balanced noise filter enabled (100 Hz high-pass).")
+    print(
+        f"[EDITH] Wake phrase required before every command: "
+        f"'{WAKE_PHRASE.title()}'."
+    )
+    print("[EDITH] Listening continuously; unrelated speech will be ignored.")
 
     # ======================================
     # LISTENING STATE
@@ -1920,6 +1987,10 @@ def main(vad_model):
 
             audio_chunk = bytes(packet_buffer[:CHUNK_BYTES])
             del packet_buffer[:CHUNK_BYTES]
+
+            # Apply the same gentle filter to VAD input and the recorded
+            # utterance so speech detection and transcription hear matching audio.
+            audio_chunk = balanced_filter_audio(audio_chunk)
 
             # ==================================
             # IGNORE AUDIO WHILE EDITH SPEAKS
