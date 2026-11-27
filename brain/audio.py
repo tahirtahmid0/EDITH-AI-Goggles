@@ -1737,7 +1737,7 @@ def transcription_worker():
             # Dedicated Gemini speech-to-text model; Live is reserved for
             # camera-aware conversation and receives recognised text only.
             try:
-                print("\n[EDITH] Transcribing speech with Gemini 3.5 Transcribe...")
+                print("\n[EDITH] Transcribing speech with Gemini Flash-Lite...")
                 text = normalize_transcription(transcribe_with_gemini(audio_data))
             except Exception as error:
                 print("[EDITH] Gemini transcription failed:", error)
