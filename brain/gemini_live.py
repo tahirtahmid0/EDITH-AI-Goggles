@@ -450,7 +450,13 @@ class GeminiLiveAssistant:
             }
             self._requests.put(request)
             if not request["done"].wait(timeout):
-                print("[EDITH GEMINI] Response timed out.")
+                print(
+                    "[EDITH GEMINI] Response timed out. "
+                    "Stopping this session so the next request can reconnect cleanly."
+                )
+                # The old turn may never emit turn_complete. Stop this session
+                # rather than leaving _active_request blocking the request queue.
+                self._stop.set()
                 return None
             if request["error"]:
                 raise RuntimeError(str(request["error"]))
