@@ -338,6 +338,10 @@ class GeminiLiveAssistant:
 
                 request = self._active_request
                 if request is not None:
+                    input_transcript = getattr(content, "input_transcription", None)
+                    if input_transcript and input_transcript.text:
+                        request["input_text_parts"].append(input_transcript.text)
+
                     transcript = getattr(content, "output_transcription", None)
                     if transcript and transcript.text:
                         request["text_parts"].append(transcript.text)
@@ -351,6 +355,7 @@ class GeminiLiveAssistant:
 
                     if getattr(content, "turn_complete", False):
                         request["result"] = {
+                            "input_text": "".join(request["input_text_parts"]).strip(),
                             "text": "".join(request["text_parts"]).strip(),
                             "audio": b"".join(request["audio_parts"]),
                         }
@@ -381,6 +386,7 @@ class GeminiLiveAssistant:
             )
             config = types.LiveConnectConfig(
                 response_modalities=[types.Modality.AUDIO],
+                input_audio_transcription=types.AudioTranscriptionConfig(),
                 output_audio_transcription=types.AudioTranscriptionConfig(),
                 system_instruction=types.Content(
                     parts=[types.Part(text=SYSTEM_INSTRUCTION)]
@@ -448,6 +454,7 @@ class GeminiLiveAssistant:
                 "question": question,
                 "audio_data": audio_data,
                 "done": threading.Event(),
+                "input_text_parts": [],
                 "text_parts": [],
                 "audio_parts": [],
                 "result": None,
