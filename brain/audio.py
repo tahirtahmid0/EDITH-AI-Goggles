@@ -1549,45 +1549,54 @@ def process_command(text, audio_data=None, gemini_result=None):
 
         speak("Give me a moment. I'm identifying the objects.")
 
-        print("[EDITH] Looking around...")
+        print("[EDITH] Using Gemini vision for object recognition...")
 
         try:
-            image = capture_image()
-            if not image:
-                raise RuntimeError("The camera returned an empty image.")
+            # Gemini Live already receives the continuous camera feed.
+            # Ask it to analyse its newest frame instead of opening a second
+            # camera connection or loading the local YOLO model.
+            visual_prompt = (
+                "Analyse the newest camera frame from my live feed. "
+                "Identify the clearly visible objects in the scene. "
+                "Give a concise spoken-style list, mentioning each object's "
+                "approximate position in the image (left, centre, right, "
+                "foreground or background) when clear. Mention important "
+                "visual details only when they help distinguish an object. "
+                "Do not guess or list objects that are not clearly visible. "
+                "If no identifiable objects are visible, say so."
+            )
 
-            detection_result = run_object_detection(image)
-            display_results(detection_result)
-
-            # ==================================
-            # EDITH SPEAKS DETECTED OBJECTS
-            # ==================================
-
-            detections = detection_result.get("detections", [])
-
-            if detections:
-                detected_objects = []
-
-                for detection in detections:
-                    name = detection["class_name"].replace("_", " ")
-                    position = get_object_position(detection)
-                    description = f"{name} {position}"
-
-                    if description not in detected_objects:
-                        detected_objects.append(description)
-
-                objects_text = ", ".join(detected_objects)
-                respond(f"I can see {objects_text}.")
+            if answer_with_gemini(visual_prompt):
+                print("[EDITH] Gemini visual object recognition completed.")
             else:
-                print("[EDITH] No objects detected.")
-                respond("I couldn't identify any objects.")
+                # Keep the proven local detector as a safety fallback if
+                # Gemini Live is unavailable or returns no usable response.
+                print("[EDITH] Gemini unavailable; falling back to local YOLO.")
+                image = capture_image()
+                if not image:
+                    raise RuntimeError("The camera returned an empty image.")
+                detection_result = run_object_detection(image)
+                display_results(detection_result)
+
+                detections = detection_result.get("detections", [])
+                if detections:
+                    detected_objects = []
+                    for detection in detections:
+                        name = detection["class_name"].replace("_", " ")
+                        position = get_object_position(detection)
+                        description = f"{name} {position}"
+                        if description not in detected_objects:
+                            detected_objects.append(description)
+                    respond("I can see " + ", ".join(detected_objects) + ".")
+                else:
+                    respond("I couldn't identify any objects.")
 
         except Exception as error:
-            print("[EDITH ERROR] Object detection failed:", error)
+            print("[EDITH ERROR] Object recognition failed:", error)
             traceback.print_exc()
             respond(
-                "I couldn't complete object detection just now. "
-                "Please check that the camera is connected and try again."
+                "I couldn't identify the objects just now. "
+                "Please check the camera connection and try again."
             )
 
     # ==========================================
