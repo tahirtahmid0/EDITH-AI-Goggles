@@ -179,7 +179,9 @@ void microphoneTask(void* parameter) {
 }
 
 // ==========================================
-// SPEAKER TASK
+// SETUP
+// ==========================================
+
 void setup() {
 
   Serial.begin(115200);
@@ -187,7 +189,7 @@ void setup() {
 
   Serial.println();
   Serial.println("========================================");
-  Serial.println("       EDITH DEVKIT AUDIO SYSTEM");
+  Serial.println("     EDITH MICROPHONE SYSTEM");
   Serial.println("========================================");
 
   // ========================================
@@ -312,8 +314,8 @@ void setup() {
     }
   }
 
-  // ========================================
-// FINAL STATUS
+    // ========================================
+  // FINAL STATUS
 // ========================================
 
   Serial.println();
