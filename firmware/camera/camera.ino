@@ -163,13 +163,14 @@ bool startCamera() {
     s->set_framesize(s, FRAMESIZE_VGA);
     s->set_quality(s, 10);
 
-    // 180-degree image rotation.
+    // Keep the image vertically flipped for the existing mounting
+    // orientation, but disable horizontal mirroring so text reads normally.
 
     s->set_vflip(s, 1);
-    s->set_hmirror(s, 1);
+    s->set_hmirror(s, 0);
 
     Serial.println(
-        "[CAMERA] 180-degree rotation enabled!"
+        "[CAMERA] Vertical flip enabled; horizontal mirroring disabled."
     );
 
     // Image adjustments.
