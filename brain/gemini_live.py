@@ -243,11 +243,11 @@ def start_camera_proxy(frames: LatestFrameStore, stop_event: threading.Event):
                         continue
 
                     self.wfile.write(
-                        b"--edithframe\\r\\n"
-                        b"Content-Type: image/jpeg\\r\\n"
-                        + f"Content-Length: {len(frame)}\\r\\n\\r\\n".encode()
+                        b"--edithframe\r\n"
+                        b"Content-Type: image/jpeg\r\n"
+                        + f"Content-Length: {len(frame)}\r\n\r\n".encode()
                         + frame
-                        + b"\\r\\n"
+                        + b"\r\n"
                     )
                     self.wfile.flush()
                     last_sequence = sequence
