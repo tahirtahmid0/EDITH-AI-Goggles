@@ -82,6 +82,18 @@ def main():
 
     finally:
 
+        # Keep cleanup here as a final safety net, including failures that
+        # happen before the audio listener has entered its own try/finally.
+        try:
+            audio.close_gemini_live()
+        except Exception as error:
+            print("[EDITH SHUTDOWN] Gemini cleanup failed:", error)
+
+        try:
+            audio.close_moondream_session()
+        except Exception as error:
+            print("[EDITH SHUTDOWN] Moondream cleanup failed:", error)
+
         if startup_complete:
             print("\n[EDITH] Session ended.")
         else:
