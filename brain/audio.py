@@ -1960,6 +1960,9 @@ def main(vad_model):
     diagnostic_chunks = 0
     diagnostic_rms_sum = 0.0
     diagnostic_probability_max = 0.0
+    diagnostic_raw_peak = 0
+    diagnostic_clipped_samples = 0
+    diagnostic_raw_sample_count = 0
 
     try:
 
@@ -2027,6 +2030,21 @@ def main(vad_model):
                         debug_capture_saved = True
                         print("[EDITH MIC DIAGNOSTIC] Could not save raw recording:", error)
 
+            # Measure the incoming PCM BEFORE filtering. This tells us
+            # whether clipping is already present in the ESP32 UDP payload.
+            raw_samples = struct.unpack(
+                "<" + "h" * CHUNK_SAMPLES,
+                audio_chunk
+            )
+            diagnostic_raw_peak = max(
+                diagnostic_raw_peak,
+                max(abs(sample) for sample in raw_samples)
+            )
+            diagnostic_clipped_samples += sum(
+                1 for sample in raw_samples if abs(sample) >= 32700
+            )
+            diagnostic_raw_sample_count += len(raw_samples)
+
             # Apply the same gentle filter to VAD input and the recorded
             # utterance so speech detection and transcription hear matching audio.
             audio_chunk = balanced_filter_audio(audio_chunk)
@@ -2082,6 +2100,9 @@ def main(vad_model):
                     "[EDITH MIC DIAGNOSTIC] "
                     f"UDP packets={total_packets} | "
                     f"RMS={average_rms:.0f} | "
+                    f"raw peak={diagnostic_raw_peak} | "
+                    f"clipped={diagnostic_clipped_samples}/"
+                    f"{diagnostic_raw_sample_count} samples | "
                     f"peak VAD={diagnostic_probability_max:.3f} | "
                     f"threshold={START_THRESHOLD:.2f}"
                 )
@@ -2089,6 +2110,9 @@ def main(vad_model):
                 diagnostic_chunks = 0
                 diagnostic_rms_sum = 0.0
                 diagnostic_probability_max = 0.0
+                diagnostic_raw_peak = 0
+                diagnostic_clipped_samples = 0
+                diagnostic_raw_sample_count = 0
 
             # ==================================
             # WAITING FOR SPEECH
