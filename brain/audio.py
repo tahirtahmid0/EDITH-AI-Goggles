@@ -67,8 +67,8 @@ _HPF_PREVIOUS_OUTPUT = 0.0
 # TEMPORARY RECOVERY TUNING: diagnostic tests showed peak VAD around 0.185
 # even during loud speech. Use a permissive threshold to restore detection;
 # raise it again after the microphone signal is confirmed clean.
-START_THRESHOLD = 0.12
-STOP_THRESHOLD = 0.08
+START_THRESHOLD = 0.45
+STOP_THRESHOLD = 0.25
 
 # 3 x 32 ms gives ~96 ms of sustained speech before opening an utterance.
 START_CHUNKS = 3
