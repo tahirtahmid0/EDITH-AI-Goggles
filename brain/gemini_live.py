@@ -349,58 +349,68 @@ class GeminiLiveAssistant:
             self._active_request = None
 
     async def _receive_responses(self, session) -> None:
+        """Receive Live events; treat socket closure during shutdown as normal."""
         while not self._stop.is_set():
-            async for response in session.receive():
-                content = response.server_content
-                if content is None:
-                    continue
+            try:
+                async for response in session.receive():
+                    content = response.server_content
+                    if content is None:
+                        continue
 
-                request = self._active_request
-                if request is not None:
-                    input_transcript = getattr(content, "input_transcription", None)
-                    if input_transcript and input_transcript.text:
-                        request["input_text_parts"].append(input_transcript.text)
-                    if input_transcript and getattr(input_transcript, "finished", False):
-                        request["input_transcription_finished"] = True
+                    request = self._active_request
+                    if request is not None:
+                        input_transcript = getattr(content, "input_transcription", None)
+                        if input_transcript and input_transcript.text:
+                            request["input_text_parts"].append(input_transcript.text)
+                        if input_transcript and getattr(input_transcript, "finished", False):
+                            request["input_transcription_finished"] = True
 
-                    # Gemini documents input transcription and model-turn
-                    # completion as independent events: either may arrive first.
-                    # Collect the final transcript before releasing this request.
-                    interim = getattr(content, "interim_input_transcription", None)
-                    if interim and interim.text and not request["input_text_parts"]:
-                        request["interim_input_text"] = interim.text
+                        # Input transcription and model-turn completion can arrive
+                        # independently, so collect both before releasing the turn.
+                        interim = getattr(content, "interim_input_transcription", None)
+                        if interim and interim.text and not request["input_text_parts"]:
+                            request["interim_input_text"] = interim.text
 
-                    transcript = getattr(content, "output_transcription", None)
-                    if transcript and transcript.text:
-                        request["text_parts"].append(transcript.text)
+                        transcript = getattr(content, "output_transcription", None)
+                        if transcript and transcript.text:
+                            request["text_parts"].append(transcript.text)
 
-                    model_turn = getattr(content, "model_turn", None)
-                    if model_turn:
-                        for part in model_turn.parts:
-                            inline_data = getattr(part, "inline_data", None)
-                            if inline_data and inline_data.data:
-                                request["audio_parts"].append(inline_data.data)
+                        model_turn = getattr(content, "model_turn", None)
+                        if model_turn:
+                            for part in model_turn.parts:
+                                inline_data = getattr(part, "inline_data", None)
+                                if inline_data and inline_data.data:
+                                    request["audio_parts"].append(inline_data.data)
 
-                    if getattr(content, "turn_complete", False):
-                        request["turn_complete"] = True
-                        if request.get("input_transcription_finished"):
+                        if getattr(content, "turn_complete", False):
+                            request["turn_complete"] = True
+                            if request.get("input_transcription_finished"):
+                                self._finish_request(request)
+                                self._active_request = None
+                            elif not request.get("transcription_grace_started"):
+                                request["transcription_grace_started"] = True
+                                asyncio.create_task(
+                                    self._finish_after_transcription_grace(request)
+                                )
+
+                        elif (
+                            request.get("turn_complete")
+                            and request.get("input_transcription_finished")
+                        ):
                             self._finish_request(request)
                             self._active_request = None
-                        elif not request.get("transcription_grace_started"):
-                            request["transcription_grace_started"] = True
-                            asyncio.create_task(
-                                self._finish_after_transcription_grace(request)
-                            )
 
-                    elif (
-                        request.get("turn_complete")
-                        and request.get("input_transcription_finished")
-                    ):
-                        self._finish_request(request)
-                        self._active_request = None
+                    if self._stop.is_set():
+                        return
 
+            except Exception as exc:
+                # Closing the Live WebSocket can surface as APIError 1000 or
+                # ConnectionClosedError. If shutdown was already requested,
+                # this is expected and must not become an unhandled task error.
                 if self._stop.is_set():
+                    print("[EDITH GEMINI] Response receiver stopped cleanly.")
                     return
+                raise
 
             if not self._stop.is_set():
                 await asyncio.sleep(0.05)
