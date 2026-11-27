@@ -1955,6 +1955,12 @@ def main(vad_model):
 
     packet_buffer = bytearray()
 
+    # Capture the first five seconds of raw ESP32 PCM for a one-time
+    # microphone playback check. This is before filtering or VAD.
+    debug_capture = bytearray()
+    debug_capture_target_bytes = SAMPLE_RATE * SAMPLE_WIDTH * 5
+    debug_capture_saved = False
+
     total_packets = 0
     last_packet_time = time.monotonic()
     last_diagnostic_time = time.monotonic()
@@ -2006,6 +2012,27 @@ def main(vad_model):
 
             audio_chunk = bytes(packet_buffer[:CHUNK_BYTES])
             del packet_buffer[:CHUNK_BYTES]
+
+            if not debug_capture_saved:
+                remaining = debug_capture_target_bytes - len(debug_capture)
+                debug_capture.extend(audio_chunk[:remaining])
+                if len(debug_capture) >= debug_capture_target_bytes:
+                    try:
+                        TEMP_DIR.mkdir(parents=True, exist_ok=True)
+                        debug_path = TEMP_DIR / "edith_mic_debug.wav"
+                        with wave.open(str(debug_path), "wb") as debug_wav:
+                            debug_wav.setnchannels(CHANNELS)
+                            debug_wav.setsampwidth(SAMPLE_WIDTH)
+                            debug_wav.setframerate(SAMPLE_RATE)
+                            debug_wav.writeframes(bytes(debug_capture))
+                        debug_capture_saved = True
+                        print(
+                            f"[EDITH MIC DIAGNOSTIC] Saved 5-second raw "
+                            f"microphone recording: {debug_path}"
+                        )
+                    except Exception as error:
+                        debug_capture_saved = True
+                        print("[EDITH MIC DIAGNOSTIC] Could not save raw recording:", error)
 
             # Apply the same gentle filter to VAD input and the recorded
             # utterance so speech detection and transcription hear matching audio.
