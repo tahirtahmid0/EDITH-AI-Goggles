@@ -64,11 +64,11 @@ _HPF_ALPHA = 1.0 - (2.0 * 3.141592653589793 * NOISE_FILTER_CUTOFF_HZ / SAMPLE_RA
 _HPF_PREVIOUS_INPUT = 0.0
 _HPF_PREVIOUS_OUTPUT = 0.0
 
-# Silero VAD's documented default speech threshold is 0.5.
-# 0.65 was too aggressive for a small, close-mounted INMP441 and could
-# reject ordinary speaking volume. Keep hysteresis for stable segmentation.
-START_THRESHOLD = 0.50
-STOP_THRESHOLD = 0.35
+# TEMPORARY RECOVERY TUNING: diagnostic tests showed peak VAD around 0.185
+# even during loud speech. Use a permissive threshold to restore detection;
+# raise it again after the microphone signal is confirmed clean.
+START_THRESHOLD = 0.12
+STOP_THRESHOLD = 0.08
 
 # 3 x 32 ms gives ~96 ms of sustained speech before opening an utterance.
 START_CHUNKS = 3
@@ -1812,27 +1812,20 @@ def transcription_worker():
             print("================================\n")
 
             if text:
-                command = extract_wake_command(text)
-                if command is None:
-                    print(
-                        f"[EDITH WAKE] Ignored speech without the required "
-                        f"'{WAKE_PHRASE}' prefix."
+                # TEMPORARY RECOVERY MODE: process every recognised utterance
+                # directly; do not require the "Hey EDITH" wake phrase.
+                command = text.strip()
+                print(f"[EDITH] Accepted command (wake phrase disabled): {command}")
+                try:
+                    vision.memory.save_conversation(
+                        role="user",
+                        content=command,
                     )
-                elif not command:
-                    print("[EDITH WAKE] Wake phrase heard; no command followed.")
-                else:
-                    print(f"[EDITH WAKE] Accepted command: {command}")
-                    try:
-                        vision.memory.save_conversation(
-                            role="user",
-                            content=command,
-                        )
-                    except Exception as error:
-                        print("[EDITH MEMORY] Could not save user message:", error)
+                except Exception as error:
+                    print("[EDITH MEMORY] Could not save user message:", error)
 
-                    # Only wake-prefixed commands reach EDITH's command router.
-                    process_command(command)
-                    last_activity_time = time.monotonic()
+                process_command(command)
+                last_activity_time = time.monotonic()
 
         except Exception as error:
             print("[EDITH] Transcription error:", error)
