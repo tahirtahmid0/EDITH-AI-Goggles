@@ -62,27 +62,26 @@ IMPORTANT RESPONSE RULES:
   user-facing system has actually provided that information."""
 
 
-def get_camera_stream_url() -> str:
-    """Use an explicit stream URL or derive the ESP32-CAM stream endpoint."""
-    stream_url = os.getenv("CAMERA_STREAM_URL", "").strip()
-    if stream_url:
-        return stream_url
-
+def get_camera_capture_url() -> str:
+    """Return the ESP32-CAM snapshot endpoint implemented by the firmware."""
     capture_url = os.getenv("CAMERA_URL", "").strip()
     if not capture_url:
         raise RuntimeError(
-            "Set CAMERA_STREAM_URL or CAMERA_URL in .env, or set "
-            "EDITH_IMAGE_PATH to use a local test image."
+            "Set CAMERA_URL in .env, or set EDITH_IMAGE_PATH "
+            "to use a local test image."
         )
 
     parsed = urlsplit(capture_url)
     if not parsed.scheme or not parsed.hostname:
         raise RuntimeError("CAMERA_URL is not a valid HTTP URL.")
 
-    host = parsed.hostname
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    return urlunsplit((parsed.scheme, f"{host}:81", "/stream", "", ""))
+    path = parsed.path.rstrip("/")
+    if not path:
+        path = "/capture"
+    elif not path.endswith("/capture"):
+        path = f"{path}/capture"
+
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def iter_mjpeg_frames(url: str, stop_event: threading.Event):
@@ -162,23 +161,49 @@ def camera_reader(
         return
 
     try:
-        stream_url = get_camera_stream_url()
+        capture_url = get_camera_capture_url()
     except Exception as exc:
         print(f"[EDITH GEMINI] Camera source unavailable: {exc}")
         stop_event.set()
         return
 
-    print(f"[EDITH GEMINI] Connecting to camera stream: {stream_url}")
-    while not stop_event.is_set():
-        try:
-            for frame in iter_mjpeg_frames(stream_url, stop_event):
-                if stop_event.is_set():
-                    break
+    print(f"[EDITH GEMINI] Polling camera snapshots: {capture_url}")
+    session = requests.Session()
+    session.headers.update({
+        "Connection": "close",
+        "Cache-Control": "no-cache",
+    })
+
+    try:
+        while not stop_event.is_set():
+            cycle_start = time.monotonic()
+            try:
+                response = session.get(
+                    capture_url,
+                    timeout=(5, 12),
+                )
+                response.raise_for_status()
+                frame = response.content
+
+                if (
+                    len(frame) < 4
+                    or not frame.startswith(b"\\xff\\xd8")
+                    or not frame.endswith(b"\\xff\\xd9")
+                ):
+                    raise ValueError("Camera returned an incomplete or invalid JPEG.")
+
                 _put_latest(frames, frame)
-        except Exception as exc:
-            if not stop_event.is_set():
-                print(f"[EDITH GEMINI] Camera stream error: {exc}")
-                stop_event.wait(2.0)
+            except Exception as exc:
+                if not stop_event.is_set():
+                    print(f"[EDITH GEMINI] Camera snapshot failed: {exc}")
+                    stop_event.wait(1.5)
+                continue
+
+            remaining = FRAME_INTERVAL_SECONDS - (time.monotonic() - cycle_start)
+            if remaining > 0:
+                stop_event.wait(remaining)
+    finally:
+        session.close()
 
     print("[EDITH GEMINI] Camera reader stopped.")
 
