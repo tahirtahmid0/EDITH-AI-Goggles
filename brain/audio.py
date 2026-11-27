@@ -578,14 +578,17 @@ def _schedule_gemini_restart():
     ).start()
 
 
-def answer_with_gemini(command, audio_data=None):
-    """Send a request to Gemini and preserve native audio even without a transcript."""
-    if _GEMINI_ASSISTANT is None:
+def answer_with_gemini(command, audio_data=None, precomputed_result=None):
+    """Send a request to Gemini, or use a response already generated from this utterance."""
+    if precomputed_result is None and _GEMINI_ASSISTANT is None:
         return False
 
     try:
-        print("[EDITH GEMINI] Sending request with the live camera context...")
-        result = _GEMINI_ASSISTANT.ask(command, audio_data=audio_data)
+        if precomputed_result is not None:
+            result = precomputed_result
+        else:
+            print("[EDITH GEMINI] Sending request with the live camera context...")
+            result = _GEMINI_ASSISTANT.ask(command, audio_data=audio_data)
 
         if not result:
             # A timed-out request stops the old session so a missing
@@ -691,10 +694,14 @@ def build_visual_question_prompt(command):
     )
 
 
-def answer_live_visual_question(command, audio_data=None):
+def answer_live_visual_question(command, audio_data=None, precomputed_result=None):
     """Prefer Gemini's live camera context; retain Moondream as local fallback."""
-    if _GEMINI_ASSISTANT is not None:
-        if answer_with_gemini(command, audio_data=audio_data):
+    if precomputed_result is not None or _GEMINI_ASSISTANT is not None:
+        if answer_with_gemini(
+            command,
+            audio_data=audio_data,
+            precomputed_result=precomputed_result,
+        ):
             return
 
     speak("Give me a moment. I'm checking the image.")
@@ -1058,7 +1065,7 @@ def normalize_transcription(text):
     return corrections.get(normalised, original)
 
 
-def process_command(text, audio_data=None):
+def process_command(text, audio_data=None, gemini_result=None):
     """
     Interpret recognised speech and execute the appropriate EDITH command.
     """
@@ -1294,7 +1301,7 @@ def process_command(text, audio_data=None):
             else:
 
                 if is_visual_question(command):
-                    answer_live_visual_question(command, audio_data=audio_data)
+                    answer_live_visual_question(command, audio_data=audio_data, precomputed_result=gemini_result)
                     return
 
                 response = "I couldn't find that in my memories."
@@ -1556,10 +1563,18 @@ def process_command(text, audio_data=None):
 
     elif is_visual_question(command):
 
-        answer_live_visual_question(command, audio_data=audio_data)
+        answer_live_visual_question(
+            command,
+            audio_data=audio_data,
+            precomputed_result=gemini_result,
+        )
 
     else:
-        if not answer_with_gemini(text, audio_data=audio_data):
+        if not answer_with_gemini(
+            text,
+            audio_data=audio_data,
+            precomputed_result=gemini_result,
+        ):
             print("[EDITH] Gemini is unavailable and no local command matched.")
             speak("I couldn't process that request right now.")
 
@@ -1637,27 +1652,23 @@ def transcription_worker():
 
     print("[EDITH] Speech recognition worker started.")
 
+    # Whisper remains available as a fallback if Gemini transcription fails.
     try:
         import mlx_whisper
-        print("[EDITH] Whisper engine ready.")
-
+        whisper_available = True
+        print("[EDITH] Whisper fallback engine ready.")
     except Exception as error:
-        print("[EDITH ERROR] Whisper failed to initialise:", error)
-        traceback.print_exc()
-        return
+        mlx_whisper = None
+        whisper_available = False
+        print("[EDITH] Whisper fallback unavailable:", error)
 
     while True:
-
-
         try:
             audio_data = audio_queue.get(timeout=1)
-
         except queue.Empty:
-
             if time.monotonic() - last_activity_time >= IDLE_TIMEOUT:
                 speak("I'm here if you need anything.")
                 last_activity_time = time.monotonic()
-
             continue
 
         if audio_data is None:
@@ -1665,86 +1676,79 @@ def transcription_worker():
             break
 
         try:
+            text = ""
+            gemini_result = None
 
-            wav_path = save_wav(audio_data)
+            # Primary speech recognition: Gemini Live input transcription.
+            if _GEMINI_ASSISTANT is not None:
+                try:
+                    print("\n[EDITH] Transcribing speech with Gemini...")
+                    gemini_result = _GEMINI_ASSISTANT.ask("", audio_data=audio_data)
+                    if gemini_result:
+                        text = str(gemini_result.get("input_text") or "").strip()
+                except Exception as error:
+                    print("[EDITH] Gemini transcription failed:", error)
+                    traceback.print_exc()
 
-            print("\n[EDITH] Transcribing speech...")
-
-            transcription_start = time.time()
-
-            result = mlx_whisper.transcribe(
-                str(wav_path),
-                path_or_hf_repo=MODEL,
-                language="en",
-                task="transcribe",
-                initial_prompt=(
-                    "EDITH is the name of an AI assistant. "
-                    "The speaker may say Hi EDITH or Hello EDITH. "
-                    "Common spoken commands include: describe what you can see, "
-                    "what can you see, what is in front of me, and identify objects. "
-                    "Transcribe the words actually spoken; do not complete or invent commands."
-                )
-            )
-
-            print(
-                f"[EDITH] Whisper processing time: "
-                f"{time.time() - transcription_start:.2f} seconds"
-            )
-
-            raw_text = result.get("text", "").strip()
-            text = normalize_transcription(raw_text)
-
-            for segment in result.get("segments", []):
-                print(
-                    f"[EDITH] No-speech probability: "
-                    f"{segment.get('no_speech_prob', 'N/A')}"
-                )
-
-                print(
-                    f"[EDITH] Average log probability: "
-                    f"{segment.get('avg_logprob', 'N/A')}"
-                )
-
-                print(
-                    f"[EDITH] Compression ratio: "
-                    f"{segment.get('compression_ratio', 'N/A')}"
-                )
+            # Local Whisper remains a safety net if Gemini gives no transcript.
+            if not text and whisper_available:
+                try:
+                    wav_path = save_wav(audio_data)
+                    print("[EDITH] Falling back to Whisper transcription...")
+                    transcription_start = time.time()
+                    result = mlx_whisper.transcribe(
+                        str(wav_path),
+                        path_or_hf_repo=MODEL,
+                        language="en",
+                        task="transcribe",
+                        initial_prompt=(
+                            "EDITH is the name of an AI assistant. "
+                            "Common commands include describe what you can see, "
+                            "what can you see, and identify objects."
+                        ),
+                    )
+                    text = normalize_transcription(str(result.get("text") or "").strip())
+                    print(
+                        f"[EDITH] Whisper processing time: "
+                        f"{time.time() - transcription_start:.2f} seconds"
+                    )
+                except Exception as error:
+                    print("[EDITH] Whisper fallback failed:", error)
+                    traceback.print_exc()
 
             print("\n================================")
             print("         EDITH HEARD")
             print("================================")
-
-            if raw_text:
-                print(raw_text)
-                if text != raw_text:
-                    print(f"[EDITH] Corrected transcription: {text}")
+            if text:
+                print(text)
             else:
                 print("[EDITH] No speech recognised.")
-
             print("================================\n")
 
             if text:
-
-                # Save the user's recognised speech.
                 try:
-                    vision.memory.save_conversation(
-                        role="user",
-                        content=text
-                    )
-
+                    vision.memory.save_conversation(role="user", content=text)
                 except Exception as error:
                     print("[EDITH MEMORY] Could not save user message:", error)
 
-                # Process the recognised command.
-                process_command(text, audio_data=audio_data)
-
+                # Reuse Gemini's generated response if this utterance is routed
+                # to Gemini. Local commands and YOLO/Moondream discard it.
+                process_command(
+                    text,
+                    audio_data=audio_data,
+                    gemini_result=(
+                        gemini_result
+                        if gemini_result and gemini_result.get("input_text")
+                        else None
+                    ),
+                )
                 last_activity_time = time.monotonic()
+            elif gemini_result and (gemini_result.get("text") or gemini_result.get("audio")):
+                answer_with_gemini("", precomputed_result=gemini_result)
 
         except Exception as error:
-
             print("[EDITH] Transcription error:", error)
             traceback.print_exc()
-
         finally:
             audio_queue.task_done()
 
