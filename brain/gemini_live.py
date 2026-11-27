@@ -140,7 +140,7 @@ def camera_reader(
     frames: queue.Queue,
     stop_event: threading.Event,
 ) -> None:
-    """Read the live MJPEG stream or repeatedly refresh a local test image."""
+    """Poll the firmware snapshot endpoint, or refresh a local test image."""
     image_path = os.getenv("EDITH_IMAGE_PATH", "").strip()
 
     if image_path:
