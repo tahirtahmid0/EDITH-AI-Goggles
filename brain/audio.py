@@ -1453,11 +1453,17 @@ def process_command(text, audio_data=None):
 
         return
 
-    if any(phrase in command for phrase in [
-        "hi edith",
-        "hello edith",
-        "hey edith"
-    ]):
+    # Accept ordinary greetings with or without the EDITH wake name.
+    # Previously, only "hi edith"/"hello edith"/"hey edith" matched,
+    # so a plain "Hi." was incorrectly forwarded to Gemini.
+    is_greeting = bool(
+        re.fullmatch(
+            r"(?:hi|hello|hey)(?:\\s+edith)?[.!?,\\s]*",
+            command
+        )
+    ) or command in {"edith hi", "edith hello", "edith hey"}
+
+    if is_greeting:
 
         if random.random() < 0.25:
             speak("One moment, please.")
