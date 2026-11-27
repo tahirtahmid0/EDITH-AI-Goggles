@@ -1088,7 +1088,7 @@ def normalize_transcription(text):
 def extract_wake_command(transcript):
     """Return the command only when the utterance starts with 'Hey EDITH'."""
     match = re.match(
-        r"^\s*hey\s+edith\b[\s,.:;!?-]*(.*)$",
+        r"^\s*hey\s+(?:edith|edit)\b[\s,.:;!?-]*(.*)$",
         str(transcript or "").strip(),
         flags=re.IGNORECASE,
     )
