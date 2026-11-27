@@ -64,10 +64,13 @@ _HPF_ALPHA = 1.0 - (2.0 * 3.141592653589793 * NOISE_FILTER_CUTOFF_HZ / SAMPLE_RA
 _HPF_PREVIOUS_INPUT = 0.0
 _HPF_PREVIOUS_OUTPUT = 0.0
 
-# Require clearer, sustained speech before recording an utterance.
-START_THRESHOLD = 0.65
-STOP_THRESHOLD = 0.40
+# Silero VAD's documented default speech threshold is 0.5.
+# 0.65 was too aggressive for a small, close-mounted INMP441 and could
+# reject ordinary speaking volume. Keep hysteresis for stable segmentation.
+START_THRESHOLD = 0.50
+STOP_THRESHOLD = 0.35
 
+# 3 x 32 ms gives ~96 ms of sustained speech before opening an utterance.
 START_CHUNKS = 3
 STOP_CHUNKS = 25
 
