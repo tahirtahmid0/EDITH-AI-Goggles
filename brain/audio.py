@@ -1647,6 +1647,50 @@ def save_wav(audio_data):
 # ==========================================
 
 
+def transcribe_with_gemini(audio_data):
+    """Transcribe one completed utterance with Gemini's dedicated STT model."""
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as error:
+        raise RuntimeError("The google-genai package is required for Gemini transcription.") from error
+
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is missing.")
+
+    # Keep one API client for the lifetime of the process.
+    global _GEMINI_TRANSCRIPTION_CLIENT
+    if _GEMINI_TRANSCRIPTION_CLIENT is None:
+        _GEMINI_TRANSCRIPTION_CLIENT = genai.Client(api_key=api_key)
+
+    wav_path = save_wav(audio_data)
+    audio_part = types.Part.from_bytes(
+        data=wav_path.read_bytes(),
+        mime_type="audio/wav",
+    )
+    response = _GEMINI_TRANSCRIPTION_CLIENT.models.generate_content(
+        model="gemini-3.5-transcribe",
+        contents=[
+            audio_part,
+            types.Part.from_text(
+                text=(
+                    "Transcribe the spoken audio verbatim. Return only the words "
+                    "spoken by the user. Do not answer the speaker, interpret the "
+                    "request, or add commentary. Preserve command wording."
+                )
+            ),
+        ],
+    )
+    transcript = str(getattr(response, "text", "") or "").strip()
+    if not transcript:
+        raise RuntimeError("Gemini 3.5 Transcribe returned an empty transcript.")
+    return transcript
+
+
+_GEMINI_TRANSCRIPTION_CLIENT = None
+
+
 def transcription_worker():
     global last_activity_time
 
@@ -1677,20 +1721,16 @@ def transcription_worker():
 
         try:
             text = ""
-            gemini_result = None
 
-            # Primary speech recognition: Gemini Live input transcription.
-            if _GEMINI_ASSISTANT is not None:
-                try:
-                    print("\n[EDITH] Transcribing speech with Gemini...")
-                    gemini_result = _GEMINI_ASSISTANT.ask("", audio_data=audio_data)
-                    if gemini_result:
-                        text = str(gemini_result.get("input_text") or "").strip()
-                except Exception as error:
-                    print("[EDITH] Gemini transcription failed:", error)
-                    traceback.print_exc()
+            # Dedicated Gemini speech-to-text model; Live is reserved for
+            # camera-aware conversation and receives recognised text only.
+            try:
+                print("\n[EDITH] Transcribing speech with Gemini 3.5 Transcribe...")
+                text = normalize_transcription(transcribe_with_gemini(audio_data))
+            except Exception as error:
+                print("[EDITH] Gemini transcription failed:", error)
 
-            # Local Whisper remains a safety net if Gemini gives no transcript.
+            # Keep the existing local Whisper fallback for resilience.
             if not text and whisper_available:
                 try:
                     wav_path = save_wav(audio_data)
@@ -1731,20 +1771,16 @@ def transcription_worker():
                 except Exception as error:
                     print("[EDITH MEMORY] Could not save user message:", error)
 
-                # Reuse Gemini's generated response if this utterance is routed
-                # to Gemini. Local commands and YOLO/Moondream discard it.
-                process_command(
-                    text,
-                    audio_data=audio_data,
-                    gemini_result=(
-                        gemini_result
-                        if gemini_result and gemini_result.get("input_text")
-                        else None
-                    ),
-                )
+                # The command router decides whether this needs Live, YOLO,
+                # Moondream, or a local memory operation. Live receives text.
+                process_command(text)
                 last_activity_time = time.monotonic()
-            elif gemini_result and (gemini_result.get("text") or gemini_result.get("audio")):
-                answer_with_gemini("", precomputed_result=gemini_result)
+
+        except Exception as error:
+            print("[EDITH] Transcription error:", error)
+            traceback.print_exc()
+        finally:
+            audio_queue.task_done()
 
         except Exception as error:
             print("[EDITH] Transcription error:", error)
