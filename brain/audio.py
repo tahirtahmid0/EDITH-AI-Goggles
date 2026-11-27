@@ -1458,7 +1458,7 @@ def process_command(text, audio_data=None):
     # so a plain "Hi." was incorrectly forwarded to Gemini.
     is_greeting = bool(
         re.fullmatch(
-            r"(?:hi|hello|hey)(?:\\s+edith)?[.!?,\\s]*",
+            r"(?:hi|hello|hey)(?:\s+edith)?[.!?,\s]*",
             command
         )
     ) or command in {"edith hi", "edith hello", "edith hey"}
