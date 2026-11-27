@@ -1956,6 +1956,11 @@ def main(vad_model):
     packet_buffer = bytearray()
 
     total_packets = 0
+    last_packet_time = time.monotonic()
+    last_diagnostic_time = time.monotonic()
+    diagnostic_chunks = 0
+    diagnostic_rms_sum = 0.0
+    diagnostic_probability_max = 0.0
 
     try:
 
@@ -1974,7 +1979,18 @@ def main(vad_model):
 
 
             except socket.timeout:
+                now = time.monotonic()
+                if now - last_diagnostic_time >= 2.0:
+                    if now - last_packet_time >= 2.0:
+                        print(
+                            "[EDITH MIC DIAGNOSTIC] No UDP packets received "
+                            f"for {now - last_packet_time:.1f}s on port {PORT}. "
+                            "Check ESP32 sender IP/port and network."
+                        )
+                    last_diagnostic_time = now
                 continue
+
+            last_packet_time = time.monotonic()
 
             # Ignore unexpected packet sizes.
             if len(data) != PACKET_BYTES:
@@ -2018,6 +2034,41 @@ def main(vad_model):
                 vad_model,
                 audio_chunk
             )
+
+            # Low-rate diagnostics distinguish a dead UDP stream, silent PCM,
+            # and a VAD threshold problem without flooding the terminal.
+            samples_for_rms = struct.unpack(
+                "<" + "h" * CHUNK_SAMPLES,
+                audio_chunk
+            )
+            chunk_rms = (
+                sum(sample * sample for sample in samples_for_rms)
+                / CHUNK_SAMPLES
+            ) ** 0.5
+            diagnostic_chunks += 1
+            diagnostic_rms_sum += chunk_rms
+            diagnostic_probability_max = max(
+                diagnostic_probability_max,
+                probability
+            )
+
+            now = time.monotonic()
+            if now - last_diagnostic_time >= 2.0:
+                average_rms = (
+                    diagnostic_rms_sum / diagnostic_chunks
+                    if diagnostic_chunks else 0.0
+                )
+                print(
+                    "[EDITH MIC DIAGNOSTIC] "
+                    f"UDP packets={total_packets} | "
+                    f"RMS={average_rms:.0f} | "
+                    f"peak VAD={diagnostic_probability_max:.3f} | "
+                    f"threshold={START_THRESHOLD:.2f}"
+                )
+                last_diagnostic_time = now
+                diagnostic_chunks = 0
+                diagnostic_rms_sum = 0.0
+                diagnostic_probability_max = 0.0
 
             # ==================================
             # WAITING FOR SPEECH
