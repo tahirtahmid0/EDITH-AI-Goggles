@@ -1669,22 +1669,36 @@ def transcribe_with_gemini(audio_data):
         data=wav_path.read_bytes(),
         mime_type="audio/wav",
     )
+    prompt_part = types.Part.from_text(
+        text=(
+            "Transcribe the spoken audio verbatim. Return only the words "
+            "spoken by the user. Do not answer the speaker, interpret the "
+            "request, or add commentary. Preserve command wording."
+        )
+    )
+
+    # Dedicated STT model first. A text-capable Gemini model is retained as
+    # a second Gemini fallback because the dedicated endpoint can occasionally
+    # return an empty response for otherwise valid audio.
+    try:
+        response = _GEMINI_TRANSCRIPTION_CLIENT.models.generate_content(
+            model="gemini-3.5-transcribe",
+            contents=[audio_part, prompt_part],
+        )
+        transcript = str(getattr(response, "text", "") or "").strip()
+        if transcript:
+            return transcript
+        print("[EDITH] Gemini 3.5 Transcribe returned no text; trying Gemini Flash-Lite.")
+    except Exception as error:
+        print("[EDITH] Gemini 3.5 Transcribe request failed; trying Gemini Flash-Lite:", error)
+
     response = _GEMINI_TRANSCRIPTION_CLIENT.models.generate_content(
-        model="gemini-3.5-transcribe",
-        contents=[
-            audio_part,
-            types.Part.from_text(
-                text=(
-                    "Transcribe the spoken audio verbatim. Return only the words "
-                    "spoken by the user. Do not answer the speaker, interpret the "
-                    "request, or add commentary. Preserve command wording."
-                )
-            ),
-        ],
+        model="gemini-3.5-flash-lite",
+        contents=[audio_part, prompt_part],
     )
     transcript = str(getattr(response, "text", "") or "").strip()
     if not transcript:
-        raise RuntimeError("Gemini 3.5 Transcribe returned an empty transcript.")
+        raise RuntimeError("Both Gemini transcription models returned an empty transcript.")
     return transcript
 
 
