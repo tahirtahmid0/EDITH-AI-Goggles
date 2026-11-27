@@ -1051,9 +1051,14 @@ def get_visual_event_response(command):
 
 
 def normalize_transcription(text):
-    """Correct a small set of high-confidence Whisper command mishearings."""
+    """Reject non-speech output and correct a known high-confidence mishearing."""
     original = str(text or "").strip()
     normalised = re.sub(r"[^a-z0-9]+", " ", original.lower()).strip()
+
+    # Gemini may occasionally return an audio timestamp (for example,
+    # "00:00") instead of transcribed words. Never route that as a command.
+    if not normalised or not re.search(r"[a-z]", normalised):
+        return ""
 
     # Whisper occasionally hears "Describe what you can see" as
     # "It's what you can see". In EDITH's command context, the intended
@@ -1755,6 +1760,8 @@ def transcription_worker():
                         ),
                     )
                     text = normalize_transcription(str(result.get("text") or "").strip())
+                    if not text:
+                        print("[EDITH] Whisper returned no usable words.")
                     print(
                         f"[EDITH] Whisper processing time: "
                         f"{time.time() - transcription_start:.2f} seconds"
