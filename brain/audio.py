@@ -119,6 +119,8 @@ audio_queue = queue.Queue(maxsize=3)
 
 # EDITH audio state
 speaking = threading.Event()
+# Blocks microphone/VAD capture from command submission through the end of processing.
+command_processing = threading.Event()
 
 # Stores a memory temporarily until the user confirms it.
 pending_explicit_memory = None
@@ -1832,6 +1834,8 @@ def transcription_worker():
             traceback.print_exc()
         finally:
             audio_queue.task_done()
+            # Resume listening only after transcription AND command handling finish.
+            command_processing.clear()
 
 
 # ==========================================
@@ -2035,10 +2039,10 @@ def main(vad_model):
             audio_chunk = balanced_filter_audio(audio_chunk)
 
             # ==================================
-            # IGNORE AUDIO WHILE EDITH SPEAKS
+            # IGNORE AUDIO WHILE EDITH SPEAKS OR PROCESSES A COMMAND
             # ==================================
 
-            if speaking.is_set():
+            if speaking.is_set() or command_processing.is_set():
                 voice_active = False
 
                 speech_count = 0
@@ -2155,8 +2159,13 @@ def main(vad_model):
                         f"{duration:.2f} seconds"
                     )
 
+                    # Lock listening immediately, before the worker starts. This
+                    # prevents a second utterance being recorded during processing.
+                    command_processing.set()
+                    queued = False
                     try:
                         audio_queue.put_nowait(complete_audio)
+                        queued = True
 
                     except queue.Full:
                         print(
@@ -2172,8 +2181,12 @@ def main(vad_model):
 
                         try:
                             audio_queue.put_nowait(complete_audio)
+                            queued = True
                         except queue.Full:
                             print("[EDITH WARNING] Could not queue the latest recording.")
+
+                    if not queued:
+                        command_processing.clear()
 
                     current_utterance = []
 
@@ -2182,9 +2195,10 @@ def main(vad_model):
 
                     pre_roll.clear()
 
-                    print(
-                        "[EDITH] Listening for your next command..."
-                    )
+                    if queued:
+                        print("[EDITH] Command queued. Microphone paused until processing finishes.")
+                    else:
+                        print("[EDITH] Listening for your next command...")
 
     except KeyboardInterrupt:
         print("\n[EDITH] Shutting down...")
