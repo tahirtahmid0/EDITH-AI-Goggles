@@ -64,7 +64,10 @@ LOCAL_IMAGE_PATH = os.getenv("EDITH_IMAGE_PATH")
 CAMERA_SESSION = requests.Session()
 
 CAMERA_SESSION.headers.update({
-    "Connection": "keep-alive"
+    # ESP32-CAM's small HTTP server is more reliable when each snapshot
+    # request closes cleanly instead of reusing an idle keep-alive socket.
+    "Connection": "close",
+    "Cache-Control": "no-cache",
 })
 
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -184,8 +187,8 @@ def capture_image():
 
             with CAMERA_SESSION.get(
                     CAMERA_URL,
-                    timeout=(5, 15),
-                    stream=True
+                    timeout=(5, 12),
+                    stream=False
             ) as response:
 
                 response.raise_for_status()
