@@ -187,8 +187,8 @@ def camera_reader(
 
                 if (
                     len(frame) < 4
-                    or not frame.startswith(b"\\xff\\xd8")
-                    or not frame.endswith(b"\\xff\\xd9")
+                    or not frame.startswith(b"\xff\xd8")
+                    or not frame.endswith(b"\xff\xd9")
                 ):
                     raise ValueError("Camera returned an incomplete or invalid JPEG.")
 
