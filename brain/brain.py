@@ -60,7 +60,7 @@ load_dotenv(BASE_DIR / ".env")
 CAMERA_URL = os.getenv("CAMERA_URL")
 LOCAL_IMAGE_PATH = os.getenv("EDITH_IMAGE_PATH")
 
-# Persistent HTTP connection to the ESP32-CAM.
+# HTTP client for ESP32-CAM snapshot requests.
 CAMERA_SESSION = requests.Session()
 
 CAMERA_SESSION.headers.update({
