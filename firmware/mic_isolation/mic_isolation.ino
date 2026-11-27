@@ -22,7 +22,7 @@ const char* WIFI_SSID = "YOUR_WIFI_SSID";
 const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
 // MACBOOK DETAILS
-const char* MAC_IP = "10.0.100.51";
+const char* MAC_IP = "172.20.10.4";
 
 // MICROPHONE UDP PORT
 const uint16_t MIC_PORT = 5005;
