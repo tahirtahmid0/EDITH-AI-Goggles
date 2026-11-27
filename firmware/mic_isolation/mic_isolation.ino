@@ -129,9 +129,9 @@ void microphoneTask(void* parameter) {
 
     for (int i = 0; i < MIC_BUFFER_SIZE; i++) {
       // Stereo RX returns interleaved [LEFT, RIGHT] 32-bit slots.
-      // INMP441 L/R is grounded, so its signal is in the LEFT slot.
+      // TEMPORARY DIAGNOSTIC: test the RIGHT slot to compare against the previous LEFT-slot recording.
       // Extract only that slot and keep its upper 16 bits as PCM.
-      audioSamples[i] = (int16_t)(rawSamples[i * 2] >> 16);
+      audioSamples[i] = (int16_t)(rawSamples[i * 2 + 1] >> 16);
     }
 
     // Continue reading even if Wi-Fi is disconnected.
