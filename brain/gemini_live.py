@@ -320,23 +320,23 @@ class GeminiLiveAssistant:
 
             self._active_request = request
             try:
-                # Bind each question to the newest camera frame in the same
-                # ordered user turn so the answer reflects the current scene.
-                frame, frame_sequence, captured_at = frames.get_latest()
-                parts = []
-                if frame is not None:
-                    parts.append(types.Part(inline_data=types.Blob(
-                        data=frame, mime_type="image/jpeg"
-                    )))
-                audio_data = request.get("audio_data")
-                if audio_data:
-                    parts.append(types.Part(inline_data=types.Blob(
-                        data=audio_data, mime_type="audio/pcm;rate=16000"
-                    )))
-                else:
-                    parts.append(types.Part(text=request["question"]))
-
+                # Serialize the read and send with background frame delivery.
+                # This makes the image as fresh as possible at send time.
                 async with send_lock:
+                    frame, frame_sequence, captured_at = frames.get_latest()
+                    parts = []
+                    if frame is not None:
+                        parts.append(types.Part(inline_data=types.Blob(
+                            data=frame, mime_type="image/jpeg"
+                        )))
+                    audio_data = request.get("audio_data")
+                    if audio_data:
+                        parts.append(types.Part(inline_data=types.Blob(
+                            data=audio_data, mime_type="audio/pcm;rate=16000"
+                        )))
+                    else:
+                        parts.append(types.Part(text=request["question"]))
+
                     await session.send_client_content(
                         turns=types.Content(role="user", parts=parts),
                         turn_complete=True,
