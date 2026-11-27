@@ -37,11 +37,12 @@ const uint16_t MIC_PORT = 5005;
 
 #define MIC_SAMPLE_RATE 16000
 #define MIC_BUFFER_SIZE 256
+#define I2S_SLOT_SAMPLE_COUNT (MIC_BUFFER_SIZE * 2)
 
 I2SClass I2S(I2S_NUM_0);
 WiFiUDP micUdp;
 
-int32_t rawSamples[MIC_BUFFER_SIZE];
+int32_t rawSamples[I2S_SLOT_SAMPLE_COUNT];
 int16_t audioSamples[MIC_BUFFER_SIZE];
 
 // ==========================================
@@ -127,9 +128,10 @@ void microphoneTask(void* parameter) {
     }
 
     for (int i = 0; i < MIC_BUFFER_SIZE; i++) {
-      // INMP441 audio is left-aligned in the 32-bit I2S slot.
-      // Keep the upper 16 bits for EDITH's 16 kHz signed PCM stream.
-      audioSamples[i] = (int16_t)(rawSamples[i] >> 16);
+      // Stereo RX returns interleaved [LEFT, RIGHT] 32-bit slots.
+      // INMP441 L/R is grounded, so its signal is in the LEFT slot.
+      // Extract only that slot and keep its upper 16 bits as PCM.
+      audioSamples[i] = (int16_t)(rawSamples[i * 2] >> 16);
     }
 
     // Continue reading even if Wi-Fi is disconnected.
@@ -281,7 +283,7 @@ void setup() {
         I2S_MODE_STD,
         MIC_SAMPLE_RATE,
         I2S_DATA_BIT_WIDTH_32BIT,
-        I2S_SLOT_MODE_MONO
+        I2S_SLOT_MODE_STEREO
       )) {
 
     Serial.println("[FATAL] Microphone I2S initialisation failed!");
