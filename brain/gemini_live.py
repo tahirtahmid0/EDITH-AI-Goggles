@@ -257,7 +257,7 @@ def start_camera_proxy(frames: LatestFrameStore, stop_event: threading.Event):
         def log_message(self, format, *args):
             return
 
-    server = LocalCameraProxy(("127.0.0.1", 8765), Handler)
+    server = LocalCameraProxy(("0.0.0.0", 8765), Handler)
     thread = threading.Thread(
         target=server.serve_forever,
         name="edith-local-camera-proxy",
