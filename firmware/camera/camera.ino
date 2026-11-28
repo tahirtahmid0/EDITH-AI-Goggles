@@ -175,24 +175,18 @@ bool startCamera() {
     );
 
     // Image adjustments.
-    // Keep brightness neutral and avoid excessive colour saturation.
 
-    s->set_brightness(s, 0);
+    s->set_brightness(s, 3);
     s->set_contrast(s, 1);
-    s->set_saturation(s, 0);
+    s->set_saturation(s, 3);
     s->set_sharpness(s, 0);
 
-    // Automatic exposure and gain remain enabled, but bias exposure
-    // downward to protect bright areas and preserve visible detail.
+    // Automatic image controls.
 
     s->set_exposure_ctrl(s, 1);
-    s->set_ae_level(s, -2);
     s->set_gain_ctrl(s, 1);
-    s->set_gainceiling(s, GAINCEILING_4X);
     s->set_whitebal(s, 1);
     s->set_awb_gain(s, 1);
-
-    Serial.println("[CAMERA] Auto exposure enabled with -2 EV bias; gain ceiling set to 4x.");
 
     // Sensor information.
 
